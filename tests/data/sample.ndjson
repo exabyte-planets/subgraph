@@ -1,0 +1,5 @@
+{"type": "person", "uuid": "A", "related": ["B", "C", "E"]}
+{"type": "person", "uuid": "B", "related": ["D"]}
+{"type": "city", "uuid": "C", "related": []}
+{"type": "city", "uuid": "D", "related": []}
+{"type": "file", "uuid": "E", "related": [], "path": "tests/data/sample.data"}
