@@ -16,9 +16,10 @@ PRAGMA synchronous  = NORMAL;
 PRAGMA cache_size   = -65536;
 
 CREATE TABLE IF NOT EXISTS nodes (
-    uuid   TEXT PRIMARY KEY,
-    type   TEXT NOT NULL,
-    offset INTEGER NOT NULL
+    uuid      TEXT PRIMARY KEY,
+    type      TEXT NOT NULL,
+    offset    INTEGER NOT NULL,
+    timestamp TEXT
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -26,11 +27,19 @@ CREATE TABLE IF NOT EXISTS edges (
     dst TEXT NOT NULL
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS idx_edges_src ON edges (src);
+CREATE INDEX IF NOT EXISTS idx_edges_src    ON edges (src);
+CREATE INDEX IF NOT EXISTS idx_nodes_type   ON nodes (type);
+CREATE INDEX IF NOT EXISTS idx_nodes_type_ts ON nodes (type, timestamp);
 
 CREATE TABLE IF NOT EXISTS closure (
     uuid TEXT PRIMARY KEY
 ) STRICT;
+"""
+
+# Applied after _SCHEMA to handle db files built before the timestamp column
+# was introduced.  Both statements are no-ops if the column / index already exist.
+_MIGRATE = """\
+ALTER TABLE nodes ADD COLUMN timestamp TEXT;
 """
 
 
@@ -54,6 +63,14 @@ class Graph:
     def __init__(self, db_path: str | Path) -> None:
         self._db = sqlite3.connect(db_path)
         self._db.executescript(_SCHEMA)
+        # Migrate indexes built before the timestamp column was added
+        try:
+            self._db.execute(_MIGRATE)
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_nodes_type_ts ON nodes (type, timestamp)"
+            )
+        except sqlite3.OperationalError:
+            pass  # column already present
 
     # ------------------------------------------------------------------ #
     # Sizing                                                               #
@@ -98,15 +115,34 @@ class Graph:
     # Core algorithm                                                       #
     # ------------------------------------------------------------------ #
 
-    def transitive_closure(self, seed_type: str, *, progress: bool = False) -> int:
+    def transitive_closure(
+        self,
+        seed_type: str,
+        *,
+        after: str | None = None,
+        before: str | None = None,
+        progress: bool = False,
+    ) -> int:
         """BFS from every node of *seed_type*; persist result to the closure table.
+
+        ``after`` and ``before`` are optional ISO 8601 strings that filter which
+        nodes of *seed_type* are used as BFS seeds.  Only nodes whose
+        ``timestamp`` field falls within the half-open interval
+        ``[after, before]`` are seeded; nodes without a ``timestamp`` are
+        excluded when either bound is given.  All nodes reachable from the
+        seeds — regardless of their own timestamp — are included in the
+        closure.
+
+        Omitting both bounds is equivalent to the previous unfiltered behaviour.
 
         Working state is kept in SQLite temp tables so memory use is O(1) in
         graph size.  Returns the number of reachable nodes.
 
         Each call replaces the previously stored closure.
         """
-        logger.info("starting BFS from seed type %r", seed_type)
+        logger.info(
+            "starting BFS from seed type %r (after=%s, before=%s)", seed_type, after, before
+        )
         db = self._db
         db.execute("DELETE FROM closure")
         db.execute("DROP TABLE IF EXISTS temp._frontier")
@@ -114,10 +150,21 @@ class Graph:
         db.execute("CREATE TEMP TABLE _frontier     (uuid TEXT PRIMARY KEY)")
         db.execute("CREATE TEMP TABLE _new_frontier (uuid TEXT PRIMARY KEY)")
 
-        # Seed: all nodes of the requested type
+        # Seed: all nodes of the requested type that satisfy the time filter.
+        # NULL timestamps fail >= / <= comparisons in SQL, so they are
+        # automatically excluded when either bound is active.
+        conditions = ["type = ?"]
+        params: list[str] = [seed_type]
+        if after:
+            conditions.append("timestamp >= ?")
+            params.append(after)
+        if before:
+            conditions.append("timestamp <= ?")
+            params.append(before)
+        where = " AND ".join(conditions)
         db.execute(
-            "INSERT OR IGNORE INTO _frontier SELECT uuid FROM nodes WHERE type = ?",
-            (seed_type,),
+            f"INSERT OR IGNORE INTO _frontier SELECT uuid FROM nodes WHERE {where}",
+            params,
         )
         db.execute("INSERT OR IGNORE INTO closure SELECT uuid FROM _frontier")
         closure_total: int = db.execute("SELECT COUNT(*) FROM _frontier").fetchone()[0]

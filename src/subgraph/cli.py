@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+from datetime import datetime
 
 from tqdm.contrib.logging import logging_redirect_tqdm
 
@@ -18,6 +19,15 @@ def _configure_logging() -> None:
     )
 
 
+def _iso8601(value: str) -> str:
+    """argparse type: validate that *value* is a parseable ISO 8601 string."""
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a valid ISO 8601 datetime: {value!r}") from None
+    return value
+
+
 def cmd_index(args: argparse.Namespace) -> None:
     with logging_redirect_tqdm():
         build_index(args.file, args.db, progress=True)
@@ -27,7 +37,12 @@ def cmd_index(args: argparse.Namespace) -> None:
 
 def cmd_query(args: argparse.Namespace) -> None:
     with Graph(args.db) as g, open(args.output, "wb") as fh, logging_redirect_tqdm():
-        g.transitive_closure(args.seed_type, progress=True)
+        g.transitive_closure(
+            args.seed_type,
+            after=args.after,
+            before=args.before,
+            progress=True,
+        )
         count = copy_records(args.file, g, fh, progress=True)
     logger.info("wrote %d records to %s", count, args.output)
 
@@ -48,6 +63,20 @@ def main() -> None:
     p_query.add_argument("file", help="Path to NDJSON source file (for full records)")
     p_query.add_argument("seed_type", help="Node type to seed the closure from")
     p_query.add_argument("output", help="Path to write the result NDJSON")
+    p_query.add_argument(
+        "--after",
+        metavar="ISO8601",
+        type=_iso8601,
+        default=None,
+        help="Only seed nodes whose timestamp >= this value (ISO 8601)",
+    )
+    p_query.add_argument(
+        "--before",
+        metavar="ISO8601",
+        type=_iso8601,
+        default=None,
+        help="Only seed nodes whose timestamp <= this value (ISO 8601)",
+    )
     p_query.set_defaults(func=cmd_query)
 
     args = parser.parse_args()

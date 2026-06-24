@@ -9,11 +9,11 @@ SAMPLE = "tests/data/sample.ndjson"
 #
 #  Sample graph:
 #
-#  A (person) -> B, C, E
-#  B (person) -> D
-#  C (city)   -> (none)
-#  D (city)   -> (none)
-#  E (file)   -> (none)  extra: path="tests/data/sample.data"
+#  A (person, timestamp=2024-03-01T10:00:00Z) -> B, C, E
+#  B (person, timestamp=2024-06-15T10:00:00Z) -> D
+#  C (city,   no timestamp)                   -> (none)
+#  D (city,   no timestamp)                   -> (none)
+#  E (file,   no timestamp)                   -> (none)  extra: path="tests/data/sample.data"
 
 
 # ------------------------------------------------------------------ #
@@ -178,6 +178,58 @@ def test_copy_records_preserves_extra_fields(db, tmp_path):
     records = [json.loads(line) for line in out.read_text().splitlines()]
     e = next(r for r in records if r["uuid"] == "E")
     assert e["path"] == "tests/data/sample.data"
+
+
+# ------------------------------------------------------------------ #
+# Timestamp filtering                                                   #
+# ------------------------------------------------------------------ #
+#
+#  No filter   → seeds {A, B} → closure {A,B,C,D,E}
+#  after=2024-04-01 → only B qualifies → closure {B, D}
+#  before=2024-04-01 → only A qualifies → closure {A,B,C,D,E} (A reaches B)
+#  after=2025-01-01 → no seeds → empty closure
+#  after+before spanning both → seeds {A,B} → closure {A,B,C,D,E}
+#  filter on city (no timestamps) → no seeds → empty
+
+
+def test_timestamp_no_filter_unchanged(db):
+    assert db.transitive_closure("person") == 5
+
+
+def test_timestamp_after_excludes_early_seed(db):
+    # only B (2024-06-15) qualifies; A (2024-03-01) is filtered out
+    count = db.transitive_closure("person", after="2024-04-01T00:00:00Z")
+    assert count == 2
+    assert set(db.iter_closure_uuids()) == {"B", "D"}
+
+
+def test_timestamp_before_excludes_late_seed(db):
+    # only A (2024-03-01) qualifies; A reaches everything
+    count = db.transitive_closure("person", before="2024-04-01T00:00:00Z")
+    assert count == 5
+    assert set(db.iter_closure_uuids()) == set("ABCDE")
+
+
+def test_timestamp_after_no_match(db):
+    assert db.transitive_closure("person", after="2025-01-01T00:00:00Z") == 0
+
+
+def test_timestamp_range_both_seeds(db):
+    count = db.transitive_closure(
+        "person", after="2024-01-01T00:00:00Z", before="2024-12-31T23:59:59Z"
+    )
+    assert count == 5
+
+
+def test_timestamp_null_nodes_excluded_by_filter(db):
+    # cities have no timestamp — applying any filter excludes them from seeds
+    assert db.transitive_closure("city", after="2024-01-01T00:00:00Z") == 0
+
+
+def test_timestamp_null_nodes_still_reachable(db):
+    # cities have no timestamp but are reachable via person A's edges
+    db.transitive_closure("person", before="2024-04-01T00:00:00Z")
+    assert "C" in set(db.iter_closure_uuids())  # reached from A, not seeded itself
 
 
 def test_copy_records_appends_missing_newline(tmp_path):

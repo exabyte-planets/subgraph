@@ -54,21 +54,23 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
         DROP TABLE IF EXISTS closure;
 
         CREATE TABLE nodes (
-            uuid TEXT PRIMARY KEY, type TEXT NOT NULL, offset INTEGER NOT NULL
+            uuid TEXT PRIMARY KEY, type TEXT NOT NULL,
+            offset INTEGER NOT NULL, timestamp TEXT
         ) STRICT;
         CREATE TABLE edges (src TEXT NOT NULL, dst TEXT NOT NULL) STRICT;
+        CREATE INDEX idx_nodes_type_ts ON nodes (type, timestamp);
         CREATE TABLE closure (uuid TEXT PRIMARY KEY) STRICT;
         """
     )
 
-    node_buf: list[tuple[str, str, int]] = []
+    node_buf: list[tuple[str, str, int, str | None]] = []
     edge_buf: list[tuple[str, str]] = []
     batches_flushed = 0
 
     def _flush() -> None:
         nonlocal batches_flushed
         with db:
-            db.executemany("INSERT OR REPLACE INTO nodes VALUES (?, ?, ?)", node_buf)
+            db.executemany("INSERT OR REPLACE INTO nodes VALUES (?, ?, ?, ?)", node_buf)
             db.executemany("INSERT INTO edges VALUES (?, ?)", edge_buf)
         batches_flushed += 1
         logger.debug("flushed batch %d (%d nodes)", batches_flushed, len(node_buf))
@@ -77,7 +79,7 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
 
     with tqdm(desc="indexing", unit="rec", disable=not progress) as pbar:
         for offset, rec in _iter_raw_with_offset(src_path):
-            node_buf.append((rec["uuid"], rec["type"], offset))
+            node_buf.append((rec["uuid"], rec["type"], offset, rec.get("timestamp")))
             for dst in rec.get("related") or []:
                 edge_buf.append((rec["uuid"], dst))
             if len(node_buf) >= _BUILD_BATCH:

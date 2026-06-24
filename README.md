@@ -35,6 +35,11 @@ Source files must be **NDJSON** — one JSON object per line:
 Every record needs `type` (string), `uuid` (string), and `related` (list of
 UUID strings). All other fields are preserved verbatim in the output.
 
+An optional `timestamp` field (ISO 8601 string) on any record enables
+time-range filtering of BFS seeds via `--after` / `--before`.  Records
+without `timestamp` are valid and simply excluded from seeding when a filter
+is active.
+
 ## Installation
 
 ```bash
@@ -59,6 +64,19 @@ uv run subgraph query data.db data.ndjson person output.ndjson
 
 Computes the transitive closure of all `person` nodes and writes their full
 records — plus every node reachable from them — to `output.ndjson`.
+
+Optionally filter which seed nodes start the BFS by their `timestamp` field:
+
+```bash
+# Only seed from persons active in Q1 2024
+uv run subgraph query data.db data.ndjson person output.ndjson \
+    --after 2024-01-01T00:00:00Z \
+    --before 2024-03-31T23:59:59Z
+```
+
+`--after` and `--before` are both optional ISO 8601 strings.  Nodes without a
+`timestamp` field are excluded from seeding when either bound is present, but
+remain reachable as non-seed nodes in the closure.
 
 ## Python API
 
@@ -89,7 +107,7 @@ with Graph("data.db") as g:
 |---|---|
 | `build_index(src, db, *, progress)` | Stream NDJSON → SQLite adjacency index |
 | `Graph(db)` | Open an index; context-manager, call `.close()` when done |
-| `Graph.transitive_closure(seed_type, *, progress) → int` | BFS from all nodes of `seed_type`; persists closure to db; returns count |
+| `Graph.transitive_closure(seed_type, *, after, before, progress) → int` | BFS from nodes of `seed_type` (optionally filtered by `timestamp`); persists closure to db; returns count |
 | `Graph.closure_size() → int` | Number of nodes in the most recent closure |
 | `Graph.iter_closure_uuids()` | Iterate UUIDs in the closure |
 | `copy_records(src, graph, out_fh, *, progress) → int` | Copy raw source bytes for closure nodes to an open binary file handle |
