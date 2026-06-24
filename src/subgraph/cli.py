@@ -1,22 +1,40 @@
 import argparse
+import logging
+import sys
+
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from subgraph import Graph, build_index, copy_records
 
+logger = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+    )
+
 
 def cmd_index(args: argparse.Namespace) -> None:
-    build_index(args.file, args.db)
+    with logging_redirect_tqdm():
+        build_index(args.file, args.db, progress=True)
     with Graph(args.db) as g:
-        print(f"Indexed {len(g)} nodes into {args.db}")
+        logger.info("index ready: %d nodes in %s", len(g), args.db)
 
 
 def cmd_query(args: argparse.Namespace) -> None:
-    with Graph(args.db) as g, open(args.output, "wb") as fh:
-        g.transitive_closure(args.seed_type)
-        count = copy_records(args.file, g, fh)
-    print(f"Wrote {count} records to {args.output}")
+    with Graph(args.db) as g, open(args.output, "wb") as fh, logging_redirect_tqdm():
+        g.transitive_closure(args.seed_type, progress=True)
+        count = copy_records(args.file, g, fh, progress=True)
+    logger.info("wrote %d records to %s", count, args.output)
 
 
 def main() -> None:
+    _configure_logging()
+
     parser = argparse.ArgumentParser(description="Transitive-closure subgraph extraction.")
     sub = parser.add_subparsers(dest="command", required=True)
 

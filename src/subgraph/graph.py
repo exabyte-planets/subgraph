@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """\
 PRAGMA journal_mode = WAL;
@@ -93,7 +98,7 @@ class Graph:
     # Core algorithm                                                       #
     # ------------------------------------------------------------------ #
 
-    def transitive_closure(self, seed_type: str) -> int:
+    def transitive_closure(self, seed_type: str, *, progress: bool = False) -> int:
         """BFS from every node of *seed_type*; persist result to the closure table.
 
         Working state is kept in SQLite temp tables so memory use is O(1) in
@@ -101,6 +106,7 @@ class Graph:
 
         Each call replaces the previously stored closure.
         """
+        logger.info("starting BFS from seed type %r", seed_type)
         db = self._db
         db.execute("DELETE FROM closure")
         db.execute("DROP TABLE IF EXISTS temp._frontier")
@@ -114,28 +120,38 @@ class Graph:
             (seed_type,),
         )
         db.execute("INSERT OR IGNORE INTO closure SELECT uuid FROM _frontier")
+        closure_total: int = db.execute("SELECT COUNT(*) FROM _frontier").fetchone()[0]
+        logger.debug("seeded %d nodes of type %r", closure_total, seed_type)
 
         # BFS: expand one hop per iteration until the frontier empties
-        while True:
-            db.execute("DELETE FROM _new_frontier")
-            db.execute(
-                """
-                INSERT OR IGNORE INTO _new_frontier
-                SELECT DISTINCT e.dst
-                FROM   edges     e
-                JOIN   _frontier f ON e.src = f.uuid
-                WHERE  e.dst NOT IN (SELECT uuid FROM closure)
-                """
-            )
-            if db.execute("SELECT COUNT(*) FROM _new_frontier").fetchone()[0] == 0:
-                break
-            db.execute("INSERT OR IGNORE INTO closure   SELECT uuid FROM _new_frontier")
-            db.execute("DELETE FROM _frontier")
-            db.execute("INSERT INTO _frontier SELECT uuid FROM _new_frontier")
+        with tqdm(desc="BFS", unit="hop", disable=not progress) as pbar:
+            while True:
+                db.execute("DELETE FROM _new_frontier")
+                db.execute(
+                    """
+                    INSERT OR IGNORE INTO _new_frontier
+                    SELECT DISTINCT e.dst
+                    FROM   edges     e
+                    JOIN   _frontier f ON e.src = f.uuid
+                    WHERE  e.dst NOT IN (SELECT uuid FROM closure)
+                    """
+                )
+                new_count: int = db.execute("SELECT COUNT(*) FROM _new_frontier").fetchone()[0]
+                if new_count == 0:
+                    break
+                db.execute("INSERT OR IGNORE INTO closure   SELECT uuid FROM _new_frontier")
+                db.execute("DELETE FROM _frontier")
+                db.execute("INSERT INTO _frontier SELECT uuid FROM _new_frontier")
+                closure_total += new_count
+                pbar.update(1)
+                pbar.set_postfix({"new": new_count, "total": closure_total})
+                logger.debug("hop: +%d nodes, %d total", new_count, closure_total)
 
         db.execute("DROP TABLE temp._frontier")
         db.execute("DROP TABLE temp._new_frontier")
-        return self.closure_size()
+        size = self.closure_size()
+        logger.info("BFS complete: %d nodes in closure", size)
+        return size
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                            #
