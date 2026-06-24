@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 from collections.abc import Iterator
@@ -29,18 +30,16 @@ CREATE TABLE IF NOT EXISTS edges (
 
 CREATE INDEX IF NOT EXISTS idx_edges_src    ON edges (src);
 CREATE INDEX IF NOT EXISTS idx_nodes_type   ON nodes (type);
-CREATE INDEX IF NOT EXISTS idx_nodes_type_ts ON nodes (type, timestamp);
 
 CREATE TABLE IF NOT EXISTS closure (
     uuid TEXT PRIMARY KEY
 ) STRICT;
 """
 
-# Applied after _SCHEMA to handle db files built before the timestamp column
-# was introduced.  Both statements are no-ops if the column / index already exist.
-_MIGRATE = """\
-ALTER TABLE nodes ADD COLUMN timestamp TEXT;
-"""
+# Run after _SCHEMA to upgrade db files built before the timestamp column was
+# introduced.  Must precede creation of idx_nodes_type_ts (which references the
+# column) and is a no-op once the column exists.
+_MIGRATE = "ALTER TABLE nodes ADD COLUMN timestamp TEXT"
 
 
 @dataclass
@@ -63,14 +62,14 @@ class Graph:
     def __init__(self, db_path: str | Path) -> None:
         self._db = sqlite3.connect(db_path)
         self._db.executescript(_SCHEMA)
-        # Migrate indexes built before the timestamp column was added
-        try:
-            self._db.execute(_MIGRATE)
-            self._db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_nodes_type_ts ON nodes (type, timestamp)"
-            )
-        except sqlite3.OperationalError:
-            pass  # column already present
+        # Add the timestamp column to indexes built before it existed.  This
+        # must run before the type_ts index is created, since that index
+        # references the column.
+        with contextlib.suppress(sqlite3.OperationalError):
+            self._db.execute(_MIGRATE)  # no-op once the column already exists
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_nodes_type_ts ON nodes (type, timestamp)"
+        )
 
     # ------------------------------------------------------------------ #
     # Sizing                                                               #

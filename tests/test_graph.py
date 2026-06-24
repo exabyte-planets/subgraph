@@ -232,6 +232,19 @@ def test_timestamp_null_nodes_still_reachable(db):
     assert "C" in set(db.iter_closure_uuids())  # reached from A, not seeded itself
 
 
+def test_build_index_reports_offset_for_bad_record(tmp_path):
+    # A record missing a required field aborts the build with the byte offset
+    # of the offending line so it can be located in a large source file.
+    src = tmp_path / "bad.ndjson"
+    src.write_text(
+        json.dumps({"type": "person", "uuid": "A", "related": []}) + "\n"
+        + json.dumps({"type": "person", "related": []}) + "\n"  # missing uuid
+    )
+    db_path = tmp_path / "bad.db"
+    with pytest.raises(ValueError, match="byte offset"):
+        build_index(src, db_path)
+
+
 def test_copy_records_appends_missing_newline(tmp_path):
     # A source whose last line has no trailing newline must still produce
     # newline-terminated NDJSON output.

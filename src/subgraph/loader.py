@@ -79,9 +79,15 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
 
     with tqdm(desc="indexing", unit="rec", disable=not progress) as pbar:
         for offset, rec in _iter_raw_with_offset(src_path):
-            node_buf.append((rec["uuid"], rec["type"], offset, rec.get("timestamp")))
+            try:
+                uuid, type_ = rec["uuid"], rec["type"]
+            except (KeyError, TypeError) as exc:
+                raise ValueError(
+                    f"record at byte offset {offset} is missing required field {exc}"
+                ) from exc
+            node_buf.append((uuid, type_, offset, rec.get("timestamp")))
             for dst in rec.get("related") or []:
-                edge_buf.append((rec["uuid"], dst))
+                edge_buf.append((uuid, dst))
             if len(node_buf) >= _BUILD_BATCH:
                 _flush()
             pbar.update(1)

@@ -78,6 +78,13 @@ uv run subgraph query data.db data.ndjson person output.ndjson \
 `timestamp` field are excluded from seeding when either bound is present, but
 remain reachable as non-seed nodes in the closure.
 
+> **Note:** timestamps are compared lexicographically (as text), not as
+> instants. Range filtering is therefore only correct when every record's
+> `timestamp` and the supplied bounds share one fixed format — same UTC
+> representation (e.g. all `...Z`), same precision, no mixing of `Z` with
+> `+00:00` offsets. The `generate_sample.py` helper emits a consistent
+> `%Y-%m-%dT%H:%M:%SZ` format suitable for this.
+
 ## Python API
 
 ```python
