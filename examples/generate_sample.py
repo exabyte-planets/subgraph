@@ -43,7 +43,10 @@ def generate(
     with open(out_path, "w") as fh:
         for uuid in person_uuids:
             k = min(edges_per_person, len(all_uuids) - 1)
-            related = rng.sample([u for u in all_uuids if u != uuid], k)
+            # Sample k+1 distinct uuids so we can drop self (if drawn) and still
+            # have k.  rng.sample is O(k), so generation stays O(persons * k)
+            # rather than rebuilding an N-element exclude list per person.
+            related = [u for u in rng.sample(all_uuids, k + 1) if u != uuid][:k]
             rec: dict = {"type": "person", "uuid": uuid, "related": related}
             ts = random_timestamp()
             if ts:
