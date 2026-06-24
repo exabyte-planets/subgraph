@@ -232,6 +232,24 @@ def test_timestamp_null_nodes_still_reachable(db):
     assert "C" in set(db.iter_closure_uuids())  # reached from A, not seeded itself
 
 
+def test_duplicate_uuid_keeps_last_occurrence(tmp_path):
+    # Deferred index build dedups duplicate uuids, keeping the last occurrence
+    # (matching the prior INSERT OR REPLACE behaviour).
+    src = tmp_path / "dup.ndjson"
+    src.write_text(
+        json.dumps({"type": "person", "uuid": "A", "related": [], "v": 1}) + "\n"
+        + json.dumps({"type": "person", "uuid": "A", "related": [], "v": 2}) + "\n"
+    )
+    db_path = tmp_path / "dup.db"
+    build_index(src, db_path)
+    with Graph(db_path) as g:
+        assert len(g) == 1  # deduped to a single node
+        g.transitive_closure("person")
+        nodes = list(stream_nodes(src, g))
+    assert len(nodes) == 1
+    assert nodes[0].extra["v"] == 2  # the last occurrence won
+
+
 def test_build_index_reports_offset_for_bad_record(tmp_path):
     # A record missing a required field aborts the build with the byte offset
     # of the offending line so it can be located in a large source file.

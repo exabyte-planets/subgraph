@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 from typing import BinaryIO
 
+import orjson
 from tqdm import tqdm
 
 from .graph import Graph, Node
@@ -28,7 +28,7 @@ def _iter_raw_with_offset(path: Path) -> Iterator[tuple[int, dict]]:
         for raw_line in fh:
             line = raw_line.strip()
             if line:
-                yield offset, json.loads(line)
+                yield offset, orjson.loads(line)
             offset += len(raw_line)
 
 
@@ -43,10 +43,20 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
     src_path = Path(src_path)
     logger.info("building index from %s", src_path)
     db = sqlite3.connect(db_path)
+    # journal/synchronous are disabled because the index is fully derived from
+    # the source and rebuilt from scratch on every run, so a crash mid-build
+    # just means re-running it.  temp_store is left on disk on purpose: the
+    # post-load CREATE INDEX sorts externally, and forcing that into memory
+    # would blow a tight RAM budget on a large graph.
+    #
+    # nodes is created WITHOUT its uuid / type indexes.  They are built in a
+    # single pass after the bulk load (see below), which turns what would be
+    # hundreds of millions of random B-tree insertions during the load into
+    # one external-merge sort — far kinder to a slow SSD and a small page cache.
     db.executescript(
         """
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous  = NORMAL;
+        PRAGMA journal_mode = OFF;
+        PRAGMA synchronous  = OFF;
         PRAGMA cache_size   = -131072;
 
         DROP TABLE IF EXISTS edges;
@@ -54,11 +64,10 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
         DROP TABLE IF EXISTS closure;
 
         CREATE TABLE nodes (
-            uuid TEXT PRIMARY KEY, type TEXT NOT NULL,
+            uuid TEXT NOT NULL, type TEXT NOT NULL,
             offset INTEGER NOT NULL, timestamp TEXT
         ) STRICT;
         CREATE TABLE edges (src TEXT NOT NULL, dst TEXT NOT NULL) STRICT;
-        CREATE INDEX idx_nodes_type_ts ON nodes (type, timestamp);
         CREATE TABLE closure (uuid TEXT PRIMARY KEY) STRICT;
         """
     )
@@ -70,7 +79,7 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
     def _flush() -> None:
         nonlocal batches_flushed
         with db:
-            db.executemany("INSERT OR REPLACE INTO nodes VALUES (?, ?, ?, ?)", node_buf)
+            db.executemany("INSERT INTO nodes VALUES (?, ?, ?, ?)", node_buf)
             db.executemany("INSERT INTO edges VALUES (?, ?)", edge_buf)
         batches_flushed += 1
         logger.debug("flushed batch %d (%d nodes)", batches_flushed, len(node_buf))
@@ -94,8 +103,24 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
 
     _flush()
 
+    # Build every index once, now that the bulk load is done.
     with db:
         db.execute("CREATE INDEX idx_edges_src ON edges (src)")
+    try:
+        with db:
+            db.execute("CREATE UNIQUE INDEX idx_nodes_uuid ON nodes (uuid)")
+    except sqlite3.IntegrityError:
+        # Duplicate uuids in the source.  Keep the last occurrence — matching
+        # the previous INSERT OR REPLACE behaviour — then build the index.
+        logger.warning("duplicate uuids found; keeping the last occurrence of each")
+        with db:
+            db.execute(
+                "DELETE FROM nodes WHERE rowid NOT IN "
+                "(SELECT MAX(rowid) FROM nodes GROUP BY uuid)"
+            )
+            db.execute("CREATE UNIQUE INDEX idx_nodes_uuid ON nodes (uuid)")
+    with db:
+        db.execute("CREATE INDEX idx_nodes_type_ts ON nodes (type, timestamp)")
 
     node_count: int = db.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
     edge_count: int = db.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
@@ -157,7 +182,7 @@ def stream_nodes(src_path: str | Path, graph: Graph, *, progress: bool = False) 
             unit="rec",
             disable=not progress,
         ):
-            rec = json.loads(_read_line_at(fh, offset))
+            rec = orjson.loads(_read_line_at(fh, offset))
             yield Node(
                 type=rec.pop("type"),
                 uuid=rec.pop("uuid"),

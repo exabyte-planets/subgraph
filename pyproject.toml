@@ -5,6 +5,7 @@ description = "Transitive-closure subgraph extraction from typed node graphs"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "orjson>=3.10",
     "tqdm>=4.68.3",
 ]
 
