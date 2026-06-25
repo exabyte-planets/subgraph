@@ -1,5 +1,7 @@
-{"type": "person", "uuid": "A", "related": ["B", "C", "E"], "timestamp": "2024-03-01T10:00:00Z"}
-{"type": "person", "uuid": "B", "related": ["D"], "timestamp": "2024-06-15T10:00:00Z"}
-{"type": "city", "uuid": "C", "related": []}
-{"type": "city", "uuid": "D", "related": []}
-{"type": "file", "uuid": "E", "related": [], "path": "tests/data/sample.data"}
+[
+{"person": {"uuid": "A", "related": ["B", "C", "E"], "timestamp": "2024-03-01T10:00:00Z"}},
+{"person": {"uuid": "B", "related": ["D"], "timestamp": "2024-06-15T10:00:00Z"}},
+{"city": {"uuid": "C", "related": []}},
+{"city": {"uuid": "D", "related": []}},
+{"file": {"uuid": "E", "related": [], "path": "tests/data/sample.data"}}
+]

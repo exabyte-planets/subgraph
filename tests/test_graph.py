@@ -98,7 +98,9 @@ def test_closure_replaced_on_second_call(db):
 
 def test_dangling_related_in_closure(tmp_path):
     data_file = tmp_path / "dangle.ndjson"
-    data_file.write_text(json.dumps({"type": "person", "uuid": "X", "related": ["MISSING"]}) + "\n")
+    data_file.write_text(
+        "[\n" + json.dumps({"person": {"uuid": "X", "related": ["MISSING"]}}) + "\n]\n"
+    )
     db_path = tmp_path / "dangle.db"
     build_index(data_file, db_path)
     with Graph(db_path) as g:
@@ -149,15 +151,20 @@ def test_copy_records_count(db, tmp_path):
         assert copy_records(SAMPLE, db, fh) == 5
 
 
-def test_copy_records_is_byte_identical_to_source(db, tmp_path):
-    # The full-graph closure copies every source line verbatim, so the output
-    # must equal the original file byte-for-byte (offsets visited in order).
+def test_copy_records_output_matches_source_records(db, tmp_path):
+    # Full-graph closure: output must contain one NDJSON line per source record,
+    # comma-stripped, in offset order — bracket lines excluded.
     db.transitive_closure("person")
     out = tmp_path / "out.ndjson"
     with open(out, "wb") as fh:
         copy_records(SAMPLE, db, fh)
-    with open(SAMPLE, "rb") as src:
-        assert out.read_bytes() == src.read()
+    with open(SAMPLE) as src:
+        source_records = [
+            line.strip().rstrip(",")
+            for line in src
+            if line.strip() and line.strip() not in ("[", "]")
+        ]
+    assert out.read_text().splitlines() == source_records
 
 
 def test_copy_records_subset_lines(db, tmp_path):
@@ -166,7 +173,7 @@ def test_copy_records_subset_lines(db, tmp_path):
     with open(out, "wb") as fh:
         copy_records(SAMPLE, db, fh)
     lines = out.read_text().splitlines()
-    uuids = {json.loads(line)["uuid"] for line in lines}
+    uuids = {next(iter(json.loads(line).values()))["uuid"] for line in lines}
     assert uuids == {"C", "D"}
 
 
@@ -175,7 +182,7 @@ def test_copy_records_preserves_extra_fields(db, tmp_path):
     out = tmp_path / "out.ndjson"
     with open(out, "wb") as fh:
         copy_records(SAMPLE, db, fh)
-    records = [json.loads(line) for line in out.read_text().splitlines()]
+    records = [next(iter(json.loads(line).values())) for line in out.read_text().splitlines()]
     e = next(r for r in records if r["uuid"] == "E")
     assert e["path"] == "tests/data/sample.data"
 
@@ -237,8 +244,10 @@ def test_duplicate_uuid_keeps_last_occurrence(tmp_path):
     # (matching the prior INSERT OR REPLACE behaviour).
     src = tmp_path / "dup.ndjson"
     src.write_text(
-        json.dumps({"type": "person", "uuid": "A", "related": [], "v": 1}) + "\n"
-        + json.dumps({"type": "person", "uuid": "A", "related": [], "v": 2}) + "\n"
+        "[\n"
+        + json.dumps({"person": {"uuid": "A", "related": [], "v": 1}}) + ",\n"
+        + json.dumps({"person": {"uuid": "A", "related": [], "v": 2}}) + "\n"
+        + "]\n"
     )
     db_path = tmp_path / "dup.db"
     build_index(src, db_path)
@@ -255,8 +264,10 @@ def test_build_index_reports_offset_for_bad_record(tmp_path):
     # of the offending line so it can be located in a large source file.
     src = tmp_path / "bad.ndjson"
     src.write_text(
-        json.dumps({"type": "person", "uuid": "A", "related": []}) + "\n"
-        + json.dumps({"type": "person", "related": []}) + "\n"  # missing uuid
+        "[\n"
+        + json.dumps({"person": {"uuid": "A", "related": []}}) + ",\n"
+        + json.dumps({"person": {"related": []}}) + "\n"  # missing uuid
+        + "]\n"
     )
     db_path = tmp_path / "bad.db"
     with pytest.raises(ValueError, match="byte offset"):
@@ -267,7 +278,7 @@ def test_copy_records_appends_missing_newline(tmp_path):
     # A source whose last line has no trailing newline must still produce
     # newline-terminated NDJSON output.
     src = tmp_path / "no_newline.ndjson"
-    src.write_bytes(b'{"type": "person", "uuid": "A", "related": []}')
+    src.write_bytes(b'[\n{"person": {"uuid": "A", "related": []}}')
     db_path = tmp_path / "nn.db"
     build_index(src, db_path)
     out = tmp_path / "out.ndjson"

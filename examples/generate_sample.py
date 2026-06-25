@@ -39,39 +39,43 @@ def generate(
         dt = ts_start + timedelta(seconds=rng.randint(0, ts_range_seconds))
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    all_records: list[dict] = []
+
+    for uuid in person_uuids:
+        k = min(edges_per_person, len(all_uuids) - 1)
+        # Sample k+1 distinct uuids so we can drop self (if drawn) and still
+        # have k.  rng.sample is O(k), so generation stays O(persons * k)
+        # rather than rebuilding an N-element exclude list per person.
+        related = [u for u in rng.sample(all_uuids, k + 1) if u != uuid][:k]
+        fields: dict = {"uuid": uuid, "related": related}
+        ts = random_timestamp()
+        if ts:
+            fields["timestamp"] = ts
+        all_records.append({"person": fields})
+
+    for uuid in city_uuids:
+        all_records.append({"city": {"uuid": uuid, "related": []}})
+
+    for i, uuid in enumerate(file_uuids):
+        all_records.append(
+            {
+                "file": {
+                    "uuid": uuid,
+                    "related": [],
+                    "path": f"/data/files/{i:05d}.bin",
+                    "size_bytes": rng.randint(1024, 10 * 1024 * 1024),
+                }
+            }
+        )
+
     written = 0
     with open(out_path, "w") as fh:
-        for uuid in person_uuids:
-            k = min(edges_per_person, len(all_uuids) - 1)
-            # Sample k+1 distinct uuids so we can drop self (if drawn) and still
-            # have k.  rng.sample is O(k), so generation stays O(persons * k)
-            # rather than rebuilding an N-element exclude list per person.
-            related = [u for u in rng.sample(all_uuids, k + 1) if u != uuid][:k]
-            rec: dict = {"type": "person", "uuid": uuid, "related": related}
-            ts = random_timestamp()
-            if ts:
-                rec["timestamp"] = ts
-            fh.write(json.dumps(rec) + "\n")
+        fh.write("[\n")
+        for i, rec in enumerate(all_records):
+            suffix = "," if i < len(all_records) - 1 else ""
+            fh.write(json.dumps(rec) + suffix + "\n")
             written += 1
-
-        for uuid in city_uuids:
-            fh.write(json.dumps({"type": "city", "uuid": uuid, "related": []}) + "\n")
-            written += 1
-
-        for i, uuid in enumerate(file_uuids):
-            fh.write(
-                json.dumps(
-                    {
-                        "type": "file",
-                        "uuid": uuid,
-                        "related": [],
-                        "path": f"/data/files/{i:05d}.bin",
-                        "size_bytes": rng.randint(1024, 10 * 1024 * 1024),
-                    }
-                )
-                + "\n"
-            )
-            written += 1
+        fh.write("]\n")
 
     print(f"wrote {written} records to {out_path}")
     print(f"  {persons} persons, {cities} cities, {files} files")
