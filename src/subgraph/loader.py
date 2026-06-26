@@ -184,6 +184,35 @@ def copy_records(
     return written
 
 
+def estimate_output_bytes(
+    src_path: str | Path, graph: Graph, *, progress: bool = False
+) -> int:
+    """Return the exact number of bytes that :func:`copy_records` would write.
+
+    Reads each closure record from *src_path* (same I/O as a real copy) but
+    discards the bytes instead of writing them.  Use this to check against a
+    size budget before committing to a full write.
+    """
+    total = graph.closure_size()
+    if total == 0:
+        return 5  # "[\n" + "\n]\n"
+
+    raw_total = 0
+    with open(src_path, "rb") as fh:
+        for offset in tqdm(
+            graph.iter_closure_offsets(),
+            total=total,
+            desc="estimating",
+            unit="rec",
+            disable=not progress,
+        ):
+            raw = _read_line_at(fh, offset).strip().rstrip(b",")
+            raw_total += len(raw)
+
+    # "[\n" (2) + raw bytes + (n-1) * ",\n" separators (2 each) + "\n]\n" (3)
+    return raw_total + 2 * (total - 1) + 5
+
+
 def stream_nodes(src_path: str | Path, graph: Graph, *, progress: bool = False) -> Iterator[Node]:
     """Yield :class:`Node` objects for every record in the stored closure.
 
