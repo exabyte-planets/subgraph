@@ -8,31 +8,33 @@ new NDJSON file — without ever holding more than a small working set in RAM.
 
 ## Design
 
-| Constraint | Approach |
-|---|---|
-| Source files up to 70 GB | Stream NDJSON line-by-line; never `json.load` the whole file |
-| 1 GiB RAM budget | All graph state (adjacency, BFS frontiers, closure) lives in SQLite on disk |
-| Fast output | Store the byte offset of each line at index time; seek directly to closure records — no re-parse, no re-serialize, byte-identical output |
+The common workflow is a single command:
 
-The workflow is two commands:
+```
+query   → auto-index if needed → BFS in SQLite → seek source offsets → write NDJSON
+```
+
+When repeated queries will hit the same source file, pre-building the index once
+saves time:
 
 ```
 index   → streams source → SQLite (uuid, type, offset, edges)
-query   → BFS in SQLite  → seek source offsets → write NDJSON
 ```
 
 ## Data format
 
-Source files must be **NDJSON** — one JSON object per line:
+Source files must be **JSON** with one JSON object per line:
 
 ```json
-{"type": "person", "uuid": "alice", "related": ["bob", "sf-office"]}
-{"type": "person", "uuid": "bob",   "related": ["nyc-office"]}
-{"type": "city",   "uuid": "sf-office",  "related": []}
-{"type": "city",   "uuid": "nyc-office", "related": []}
+[
+{"type": "person", "Id": "alice", "RelatedIds": ["bob", "sf-office"]}
+{"type": "person", "Id": "bob",   "RelatedIds": ["nyc-office"]}
+{"type": "city",   "Id": "sf-office",  "RelatedIds": []}
+{"type": "city",   "Id": "nyc-office", "RelatedIds": []}
+]
 ```
 
-Every record needs `type` (string), `uuid` (string), and `related` (list of
+Every record needs `type` (string), `Id` (string), and `RelatedIds` (list of
 UUID strings). All other fields are preserved verbatim in the output.
 
 An optional `timestamp` field (ISO 8601 string) on any record enables
@@ -48,28 +50,27 @@ uv sync
 
 ## CLI
 
-### Build an index
-
-```bash
-uv run subgraph index data.ndjson data.db
-```
-
-Re-running rebuilds the index from scratch.
-
 ### Query a closure
 
 ```bash
-uv run subgraph query data.db data.ndjson person output.ndjson
+uv run subgraph query data.ndjson person
 ```
 
 Computes the transitive closure of all `person` nodes and writes their full
-records — plus every node reachable from them — to `output.ndjson`.
+records — plus every node reachable from them — to `data_person.json` next to
+the source file.  If `data.db` does not exist it is built automatically first.
+
+Pass an explicit output path as a third argument to override the default:
+
+```bash
+uv run subgraph query data.ndjson person output/subset.json
+```
 
 Optionally filter which seed nodes start the BFS by their `timestamp` field:
 
 ```bash
 # Only seed from persons active in Q1 2024
-uv run subgraph query data.db data.ndjson person output.ndjson \
+uv run subgraph query data.ndjson person \
     --after 2024-01-01T00:00:00Z \
     --before 2024-03-31T23:59:59Z
 ```
@@ -77,6 +78,18 @@ uv run subgraph query data.db data.ndjson person output.ndjson \
 `--after` and `--before` are both optional ISO 8601 strings.  Nodes without a
 `timestamp` field are excluded from seeding when either bound is present, but
 remain reachable as non-seed nodes in the closure.
+
+### Pre-build the index
+
+When you plan to run many queries against the same source file, build the index
+once up front rather than paying for it on the first `query`:
+
+```bash
+uv run subgraph index data.ndjson
+```
+
+This writes `data.db` alongside `data.ndjson`.  Re-running rebuilds from
+scratch.
 
 > **Note:** timestamps are compared lexicographically (as text), not as
 > instants. Range filtering is therefore only correct when every record's
@@ -108,30 +121,6 @@ with Graph("data.db") as g:
         print(node.uuid, node.type, node.extra)
 ```
 
-### Key types
-
-| Symbol | Description |
-|---|---|
-| `build_index(src, db, *, progress)` | Stream NDJSON → SQLite adjacency index |
-| `Graph(db)` | Open an index; context-manager, call `.close()` when done |
-| `Graph.transitive_closure(seed_type, *, after, before, progress) → int` | BFS from nodes of `seed_type` (optionally filtered by `timestamp`); persists closure to db; returns count |
-| `Graph.closure_size() → int` | Number of nodes in the most recent closure |
-| `Graph.iter_closure_uuids()` | Iterate UUIDs in the closure |
-| `copy_records(src, graph, out_fh, *, progress) → int` | Copy raw source bytes for closure nodes to an open binary file handle |
-| `stream_nodes(src, graph, *, progress)` | Yield parsed `Node` objects for closure nodes |
-| `Node` | Dataclass: `type`, `uuid`, `related: list[str]`, `extra: dict` |
-
-## Logging
-
-The library logs to the `subgraph` hierarchy at `INFO` (lifecycle events) and
-`DEBUG` (per-batch / per-hop detail). The CLI configures a stdout handler at
-`INFO`. To enable debug output:
-
-```python
-import logging
-logging.getLogger("subgraph").setLevel(logging.DEBUG)
-```
-
 ## Examples
 
 See [`examples/`](examples/) for runnable scripts.
@@ -154,6 +143,8 @@ uv run python examples/generate_sample.py \
     --persons 100000 --cities 500 --files 1000 \
     --out big.ndjson
 
-uv run subgraph index big.ndjson big.db
-uv run subgraph query big.db big.ndjson person output.ndjson
+# Pre-build the index once, then run as many queries as you like
+uv run subgraph index big.ndjson
+uv run subgraph query big.ndjson person
+uv run subgraph query big.ndjson city
 ```

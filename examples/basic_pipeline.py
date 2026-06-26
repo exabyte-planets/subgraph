@@ -1,6 +1,11 @@
 """End-to-end example: generate data, build an index, run a closure query.
 
-Runs entirely in the examples/ directory so it doesn't touch the test fixtures.
+Demonstrates the Python API.  For the equivalent CLI workflow:
+
+    uv run python examples/generate_sample.py --out graph.ndjson
+    uv run subgraph query graph.ndjson person   # index built automatically
+
+Runs entirely in a temp directory so it doesn't touch the project tree.
 
 Usage:
     uv run python examples/basic_pipeline.py

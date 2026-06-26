@@ -2,6 +2,7 @@ import argparse
 import logging
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from tqdm.contrib.logging import logging_redirect_tqdm
 
@@ -28,23 +29,39 @@ def _iso8601(value: str) -> str:
     return value
 
 
+def _db_for(file: Path) -> Path:
+    return file.with_suffix(".db")
+
+
 def cmd_index(args: argparse.Namespace) -> None:
+    file = Path(args.file)
+    db = _db_for(file)
     with logging_redirect_tqdm():
-        build_index(args.file, args.db, progress=True)
-    with Graph(args.db) as g:
-        logger.info("index ready: %d nodes in %s", len(g), args.db)
+        build_index(file, db, progress=True)
+    with Graph(db) as g:
+        logger.info("index ready: %d nodes in %s", len(g), db)
 
 
 def cmd_query(args: argparse.Namespace) -> None:
-    with Graph(args.db) as g, open(args.output, "wb") as fh, logging_redirect_tqdm():
+    file = Path(args.file)
+    db = _db_for(file)
+
+    if not db.exists():
+        logger.info("index %s not found — building now", db)
+        with logging_redirect_tqdm():
+            build_index(file, db, progress=True)
+
+    output = Path(args.output) if args.output else file.with_name(f"{file.stem}_{args.seed_type}.json")
+
+    with Graph(db) as g, open(output, "wb") as fh, logging_redirect_tqdm():
         g.transitive_closure(
             args.seed_type,
             after=args.after,
             before=args.before,
             progress=True,
         )
-        count = copy_records(args.file, g, fh, progress=True)
-    logger.info("wrote %d records to %s", count, args.output)
+        count = copy_records(file, g, fh, progress=True)
+    logger.info("wrote %d records to %s", count, output)
 
 
 def main() -> None:
@@ -54,15 +71,18 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_index = sub.add_parser("index", help="Build SQLite index from a data file.")
-    p_index.add_argument("file", help="Path to NDJSON source file")
-    p_index.add_argument("db", help="Path to write the SQLite index")
+    p_index.add_argument("file", help="Path to NDJSON source file (.db index written alongside it)")
     p_index.set_defaults(func=cmd_index)
 
     p_query = sub.add_parser("query", help="Compute closure and write matching nodes to a file.")
-    p_query.add_argument("db", help="Path to the SQLite index")
-    p_query.add_argument("file", help="Path to NDJSON source file (for full records)")
+    p_query.add_argument("file", help="Path to NDJSON source file")
     p_query.add_argument("seed_type", help="Node type to seed the closure from")
-    p_query.add_argument("output", help="Path to write the result NDJSON")
+    p_query.add_argument(
+        "output",
+        nargs="?",
+        default=None,
+        help="Output path (default: <stem>_<seed_type>.json next to the input file)",
+    )
     p_query.add_argument(
         "--after",
         metavar="ISO8601",
