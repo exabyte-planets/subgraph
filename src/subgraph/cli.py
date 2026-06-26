@@ -58,7 +58,9 @@ def cmd_query(args: argparse.Namespace) -> None:
         with logging_redirect_tqdm():
             build_index(file, db, progress=True)
 
-    output = Path(args.output) if args.output else file.with_name(f"{file.stem}_{args.seed_type}.json")
+    output = (
+        Path(args.output) if args.output else file.with_name(f"{file.stem}_{args.seed_type}.json")
+    )
 
     with Graph(db) as g, logging_redirect_tqdm():
         g.transitive_closure(

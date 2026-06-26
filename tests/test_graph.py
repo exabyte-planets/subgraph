@@ -243,8 +243,10 @@ def test_duplicate_uuid_keeps_last_occurrence(tmp_path):
     src = tmp_path / "dup.ndjson"
     src.write_text(
         "[\n"
-        + json.dumps({"person": {"Id": "A", "RelatedIds": [], "v": 1}}) + ",\n"
-        + json.dumps({"person": {"Id": "A", "RelatedIds": [], "v": 2}}) + "\n"
+        + json.dumps({"person": {"Id": "A", "RelatedIds": [], "v": 1}})
+        + ",\n"
+        + json.dumps({"person": {"Id": "A", "RelatedIds": [], "v": 2}})
+        + "\n"
         + "]\n"
     )
     db_path = tmp_path / "dup.db"
@@ -263,8 +265,10 @@ def test_build_index_reports_offset_for_bad_record(tmp_path):
     src = tmp_path / "bad.ndjson"
     src.write_text(
         "[\n"
-        + json.dumps({"person": {"Id": "A", "RelatedIds": []}}) + ",\n"
-        + json.dumps({"person": {"RelatedIds": []}}) + "\n"  # missing Id
+        + json.dumps({"person": {"Id": "A", "RelatedIds": []}})
+        + ",\n"
+        + json.dumps({"person": {"RelatedIds": []}})
+        + "\n"  # missing Id
         + "]\n"
     )
     db_path = tmp_path / "bad.db"
