@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from subgraph import Graph, build_index, copy_records
+from subgraph import Graph, build_index, copy_records, estimate_output_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,13 @@ def cmd_index(args: argparse.Namespace) -> None:
         logger.info("index ready: %d nodes in %s", len(g), db)
 
 
+def _fmt_bytes(n: int) -> str:
+    for unit, threshold in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if n >= threshold:
+            return f"{n / threshold:.1f} {unit} ({n:,} bytes)"
+    return f"{n:,} bytes"
+
+
 def cmd_query(args: argparse.Namespace) -> None:
     file = Path(args.file)
     db = _db_for(file)
@@ -53,14 +60,52 @@ def cmd_query(args: argparse.Namespace) -> None:
 
     output = Path(args.output) if args.output else file.with_name(f"{file.stem}_{args.seed_type}.json")
 
-    with Graph(db) as g, open(output, "wb") as fh, logging_redirect_tqdm():
+    with Graph(db) as g, logging_redirect_tqdm():
         g.transitive_closure(
             args.seed_type,
             after=args.after,
             before=args.before,
             progress=True,
         )
-        count = copy_records(file, g, fh, progress=True)
+
+        total_nodes = len(g)
+        seed_count = g.count_type(args.seed_type, after=args.after, before=args.before)
+        record_count = g.closure_size()
+        expansion = record_count - seed_count
+        coverage = 100.0 * record_count / total_nodes if total_nodes else 0.0
+
+        logger.info(
+            "closure stats — seed type: %r | seeds: %d | expansion: +%d"
+            " | closure: %d / %d nodes (%.1f%% of graph)",
+            args.seed_type,
+            seed_count,
+            expansion,
+            record_count,
+            total_nodes,
+            coverage,
+        )
+
+        if args.max_records is not None and record_count > args.max_records:
+            logger.error(
+                "closure contains %d records, which exceeds --max-records %d; aborting",
+                record_count,
+                args.max_records,
+            )
+            sys.exit(1)
+
+        if args.max_bytes is not None:
+            estimated = estimate_output_bytes(file, g, progress=True)
+            if estimated > args.max_bytes:
+                logger.error(
+                    "estimated output size %s exceeds --max-bytes %s; aborting",
+                    _fmt_bytes(estimated),
+                    _fmt_bytes(args.max_bytes),
+                )
+                sys.exit(1)
+            logger.info("estimated output size: %s (within limit)", _fmt_bytes(estimated))
+
+        with open(output, "wb") as fh:
+            count = copy_records(file, g, fh, progress=True)
     logger.info("wrote %d records to %s", count, output)
 
 
@@ -96,6 +141,26 @@ def main() -> None:
         type=_iso8601,
         default=None,
         help="Only seed nodes whose timestamp <= this value (ISO 8601)",
+    )
+    p_query.add_argument(
+        "--max-records",
+        metavar="N",
+        type=int,
+        default=4_000_000,
+        help=(
+            "Abort without writing output if the closure exceeds N records"
+            " (default: 4,000,000 — safe limit for 4 GB)"
+        ),
+    )
+    p_query.add_argument(
+        "--max-bytes",
+        metavar="N",
+        type=int,
+        default=None,
+        help=(
+            "Abort without writing output if the estimated output JSON exceeds N bytes"
+            " (default: None — no limit)"
+        ),
     )
     p_query.set_defaults(func=cmd_query)
 

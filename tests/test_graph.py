@@ -1,10 +1,12 @@
 import json
+import subprocess
+import sys
 
 import pytest
 
-from subgraph import Graph, Node, build_index, copy_records, stream_nodes
+from subgraph import Graph, Node, build_index, copy_records, estimate_output_bytes, stream_nodes
 
-SAMPLE = "tests/data/sample.ndjson"
+SAMPLE = "tests/data/sample.json"
 
 #
 #  Sample graph:
@@ -284,3 +286,119 @@ def test_copy_records_appends_missing_newline(tmp_path):
             copy_records(src, g, fh)
     data = json.loads(out.read_text())
     assert len(data) == 1
+
+
+# ------------------------------------------------------------------ #
+# estimate_output_bytes                                                #
+# ------------------------------------------------------------------ #
+
+
+def test_estimate_matches_copy_records(db, tmp_path):
+    db.transitive_closure("person")
+    out = tmp_path / "out.json"
+    estimated = estimate_output_bytes(SAMPLE, db)
+    with open(out, "wb") as fh:
+        copy_records(SAMPLE, db, fh)
+    assert estimated == out.stat().st_size
+
+
+def test_estimate_empty_closure(db):
+    db.transitive_closure("widget")  # no nodes of this type
+    assert estimate_output_bytes(SAMPLE, db) == 5  # "[\n\n]\n"
+
+
+def test_estimate_city_subset(db, tmp_path):
+    db.transitive_closure("city")
+    out = tmp_path / "out.json"
+    estimated = estimate_output_bytes(SAMPLE, db)
+    with open(out, "wb") as fh:
+        copy_records(SAMPLE, db, fh)
+    assert estimated == out.stat().st_size
+
+
+# ------------------------------------------------------------------ #
+# Graph.count_type                                                     #
+# ------------------------------------------------------------------ #
+
+
+def test_count_type_seed_matches_person(db):
+    assert db.count_type("person") == 2
+
+
+def test_count_type_seed_matches_city(db):
+    assert db.count_type("city") == 2
+
+
+def test_count_type_unknown_returns_zero(db):
+    assert db.count_type("widget") == 0
+
+
+def test_count_type_with_after_filter(db):
+    # only B (2024-06-15) qualifies when seeding after 2024-04-01
+    assert db.count_type("person", after="2024-04-01T00:00:00Z") == 1
+
+
+def test_count_type_with_before_filter(db):
+    # only A (2024-03-01) qualifies before 2024-04-01
+    assert db.count_type("person", before="2024-04-01T00:00:00Z") == 1
+
+
+# ------------------------------------------------------------------ #
+# CLI threshold flags                                                  #
+# ------------------------------------------------------------------ #
+
+
+def _run_query(args: list[str], tmp_path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "subgraph.cli", "query", *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_cli_max_records_passes(tmp_path):
+    out = tmp_path / "out.json"
+    result = _run_query(
+        [SAMPLE, "person", str(out), "--max-records", "10"],
+        tmp_path,
+    )
+    assert result.returncode == 0
+    assert out.exists()
+
+
+def test_cli_default_max_records_allows_small_closure(tmp_path):
+    # sample has 5 nodes — well under the 5 M default
+    out = tmp_path / "out.json"
+    result = _run_query([SAMPLE, "person", str(out)], tmp_path)
+    assert result.returncode == 0
+    assert out.exists()
+
+
+def test_cli_max_records_blocks(tmp_path):
+    out = tmp_path / "out.json"
+    result = _run_query(
+        [SAMPLE, "person", str(out), "--max-records", "3"],
+        tmp_path,
+    )
+    assert result.returncode == 1
+    assert not out.exists()
+
+
+def test_cli_max_bytes_passes(tmp_path):
+    out = tmp_path / "out.json"
+    result = _run_query(
+        [SAMPLE, "person", str(out), "--max-bytes", str(4 * 1024 * 1024 * 1024)],
+        tmp_path,
+    )
+    assert result.returncode == 0
+    assert out.exists()
+
+
+def test_cli_max_bytes_blocks(tmp_path):
+    out = tmp_path / "out.json"
+    result = _run_query(
+        [SAMPLE, "person", str(out), "--max-bytes", "10"],
+        tmp_path,
+    )
+    assert result.returncode == 1
+    assert not out.exists()

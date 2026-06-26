@@ -79,6 +79,50 @@ uv run subgraph query data.json person \
 `timestamp` field are excluded from seeding when either bound is present, but
 remain reachable as non-seed nodes in the closure.
 
+### Closure statistics
+
+Every `query` run prints a stats line after the BFS completes:
+
+```
+closure stats — seed type: 'person' | seeds: 2 | expansion: +3 | closure: 5 / 5 nodes (100.0% of graph)
+```
+
+| Field | Meaning |
+|---|---|
+| `seeds` | Nodes of the requested type that seeded the BFS (respects `--after`/`--before`) |
+| `expansion` | Additional nodes pulled in by following edges |
+| `closure / graph` | Output record count and its share of all indexed nodes |
+
+### Output size limits
+
+`query` aborts before writing any output if the closure would exceed a
+configured limit.  No partial file is left on disk.
+
+**Record count** (default: 4,000,000):
+
+```bash
+# Use the default 4 M record guard
+uv run subgraph query data.json person
+
+# Raise the limit for a known-large dataset
+uv run subgraph query data.json person --max-records 10000000
+
+# Disable the record limit
+uv run subgraph query data.json person --max-records 0
+```
+
+**Output file size** (opt-in; reads source records to measure exactly):
+
+```bash
+# Hard 4 GB guard — matches the Electron V8 JSON-parse limit
+uv run subgraph query data.json person --max-bytes 4294967296
+```
+
+`--max-bytes` performs a read pass over the closure records before writing, so
+it adds I/O proportional to closure size.  Use `--max-records` when a fast
+pre-flight check is enough; add `--max-bytes` when you need a precise byte
+budget.
+
 ### Pre-build the index
 
 When you plan to run many queries against the same source file, build the index
@@ -101,15 +145,22 @@ scratch.
 ## Python API
 
 ```python
-from subgraph import Graph, build_index, copy_records, stream_nodes
+from subgraph import Graph, build_index, copy_records, estimate_output_bytes, stream_nodes
 
 # One-time index build
 build_index("data.json", "data.db", progress=True)
 
 # Compute closure and copy raw records (fastest path)
 with Graph("data.db") as g:
-    count = g.transitive_closure("person", progress=True)
-    print(f"{count} nodes in closure")
+    seed_count = g.count_type("person")           # seeds before BFS
+    closure_count = g.transitive_closure("person", progress=True)
+    expansion = closure_count - seed_count
+    print(f"{seed_count} seeds → {closure_count} nodes ({expansion} via expansion)")
+
+    # Check size before writing (reads source; exact byte count)
+    estimated = estimate_output_bytes("data.json", g)
+    if estimated > 4 * 1024 ** 3:
+        raise RuntimeError(f"output would be {estimated:,} bytes — exceeds 4 GB")
 
     with open("output.json", "wb") as fh:
         copy_records("data.json", g, fh, progress=True)

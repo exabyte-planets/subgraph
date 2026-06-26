@@ -81,6 +81,27 @@ class Graph:
     def closure_size(self) -> int:
         return self._db.execute("SELECT COUNT(*) FROM closure").fetchone()[0]
 
+    def count_type(
+        self, type_name: str, *, after: str | None = None, before: str | None = None
+    ) -> int:
+        """Return the number of nodes of *type_name* that match the given time filter.
+
+        Uses the same conditions as :meth:`transitive_closure` so the result
+        equals the number of BFS seeds for an equivalent call.
+        """
+        conditions = ["type = ?"]
+        params: list[str] = [type_name]
+        if after:
+            conditions.append("timestamp >= ?")
+            params.append(after)
+        if before:
+            conditions.append("timestamp <= ?")
+            params.append(before)
+        where = " AND ".join(conditions)
+        return self._db.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {where}", params
+        ).fetchone()[0]
+
     # ------------------------------------------------------------------ #
     # Closure access                                                       #
     # ------------------------------------------------------------------ #
