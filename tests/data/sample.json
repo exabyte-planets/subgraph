@@ -1,9 +1,9 @@
 [
 
-{"person": {"Id": "A", "RelatedIds": [{"Value": "B"}, {"Value": "C"}, {"Value": "E"}], "timestamp": "2024-03-01T10:00:00Z"}},
-{"person": {"Id": "B", "RelatedIds": [{"Value": "D"}], "timestamp": "2024-06-15T10:00:00Z"}},
-{"city": {"Id": "C", "RelatedIds": []}},
-{"city": {"Id": "D", "RelatedIds": []}},
-{"file": {"Id": "E", "RelatedIds": [], "path": "tests/data/sample.data"}}
+{"person": {"Name": "Alice", "Id": "A", "RelatedIds": [{"Value": "B"}, {"Value": "C"}, {"Value": "E"}], "timestamp": "2024-03-01T10:00:00Z"}},
+{"person": {"Name": "Bob", "Id": "B", "RelatedIds": [{"Value": "D"}], "timestamp": "2024-06-15T10:00:00Z"}},
+{"city": {"Place": "City C", "Id": "C", "RelatedIds": []}},
+{"city": {"Place": "City D", "Id": "D", "RelatedIds": []}},
+{"file": {"FileName": "Sample File", "Id": "E", "RelatedIds": [], "path": "tests/data/sample.data"}}
 
 ]
