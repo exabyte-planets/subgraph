@@ -132,8 +132,7 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
         logger.warning("duplicate uuids found; keeping the last occurrence of each")
         with db:
             db.execute(
-                "DELETE FROM nodes WHERE rowid NOT IN "
-                "(SELECT MAX(rowid) FROM nodes GROUP BY uuid)"
+                "DELETE FROM nodes WHERE rowid NOT IN (SELECT MAX(rowid) FROM nodes GROUP BY uuid)"
             )
             db.execute("CREATE UNIQUE INDEX idx_nodes_uuid ON nodes (uuid)")
     with db:
@@ -184,9 +183,7 @@ def copy_records(
     return written
 
 
-def estimate_output_bytes(
-    src_path: str | Path, graph: Graph, *, progress: bool = False
-) -> int:
+def estimate_output_bytes(src_path: str | Path, graph: Graph, *, progress: bool = False) -> int:
     """Return the exact number of bytes that :func:`copy_records` would write.
 
     Reads each closure record from *src_path* (same I/O as a real copy) but

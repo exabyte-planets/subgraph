@@ -67,9 +67,7 @@ class Graph:
         # references the column.
         with contextlib.suppress(sqlite3.OperationalError):
             self._db.execute(_MIGRATE)  # no-op once the column already exists
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_nodes_type_ts ON nodes (type, timestamp)"
-        )
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_nodes_type_ts ON nodes (type, timestamp)")
 
     # ------------------------------------------------------------------ #
     # Sizing                                                               #
@@ -98,9 +96,7 @@ class Graph:
             conditions.append("timestamp <= ?")
             params.append(before)
         where = " AND ".join(conditions)
-        return self._db.execute(
-            f"SELECT COUNT(*) FROM nodes WHERE {where}", params
-        ).fetchone()[0]
+        return self._db.execute(f"SELECT COUNT(*) FROM nodes WHERE {where}", params).fetchone()[0]
 
     # ------------------------------------------------------------------ #
     # Closure access                                                       #
