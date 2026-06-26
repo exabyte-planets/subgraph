@@ -1,17 +1,17 @@
 # subgraph
 
-Transitive-closure extraction from large typed node graphs stored as NDJSON.
+Transitive-closure extraction from large typed node graphs stored as JSON.
 
 Given a seed node type (e.g. `"person"`), **subgraph** finds every node
 reachable by following `related` links and writes the matching records to a
-new NDJSON file — without ever holding more than a small working set in RAM.
+new JSON file — without ever holding more than a small working set in RAM.
 
 ## Design
 
 The common workflow is a single command:
 
 ```
-query   → auto-index if needed → BFS in SQLite → seek source offsets → write NDJSON
+query   → auto-index if needed → BFS in SQLite → seek source offsets → write JSON
 ```
 
 When repeated queries will hit the same source file, pre-building the index once
@@ -53,7 +53,7 @@ uv sync
 ### Query a closure
 
 ```bash
-uv run subgraph query data.ndjson person
+uv run subgraph query data.json person
 ```
 
 Computes the transitive closure of all `person` nodes and writes their full
@@ -63,14 +63,14 @@ the source file.  If `data.db` does not exist it is built automatically first.
 Pass an explicit output path as a third argument to override the default:
 
 ```bash
-uv run subgraph query data.ndjson person output/subset.json
+uv run subgraph query data.json person output/subset.json
 ```
 
 Optionally filter which seed nodes start the BFS by their `timestamp` field:
 
 ```bash
 # Only seed from persons active in Q1 2024
-uv run subgraph query data.ndjson person \
+uv run subgraph query data.json person \
     --after 2024-01-01T00:00:00Z \
     --before 2024-03-31T23:59:59Z
 ```
@@ -85,10 +85,10 @@ When you plan to run many queries against the same source file, build the index
 once up front rather than paying for it on the first `query`:
 
 ```bash
-uv run subgraph index data.ndjson
+uv run subgraph index data.json
 ```
 
-This writes `data.db` alongside `data.ndjson`.  Re-running rebuilds from
+This writes `data.db` alongside `data.json`.  Re-running rebuilds from
 scratch.
 
 > **Note:** timestamps are compared lexicographically (as text), not as
@@ -104,20 +104,20 @@ scratch.
 from subgraph import Graph, build_index, copy_records, stream_nodes
 
 # One-time index build
-build_index("data.ndjson", "data.db", progress=True)
+build_index("data.json", "data.db", progress=True)
 
 # Compute closure and copy raw records (fastest path)
 with Graph("data.db") as g:
     count = g.transitive_closure("person", progress=True)
     print(f"{count} nodes in closure")
 
-    with open("output.ndjson", "wb") as fh:
-        copy_records("data.ndjson", g, fh, progress=True)
+    with open("output.json", "wb") as fh:
+        copy_records("data.json", g, fh, progress=True)
 
 # Or iterate as structured Node objects
 with Graph("data.db") as g:
     g.transitive_closure("person")
-    for node in stream_nodes("data.ndjson", g):
+    for node in stream_nodes("data.json", g):
         print(node.uuid, node.type, node.extra)
 ```
 
@@ -127,7 +127,7 @@ See [`examples/`](examples/) for runnable scripts.
 
 | Script | Description |
 |---|---|
-| [`generate_sample.py`](examples/generate_sample.py) | Generate a synthetic NDJSON graph of configurable size |
+| [`generate_sample.py`](examples/generate_sample.py) | Generate a synthetic json graph of configurable size |
 | [`basic_pipeline.py`](examples/basic_pipeline.py) | Full end-to-end walkthrough: generate → index → closure → copy/stream |
 
 ### Run the pipeline example
@@ -141,10 +141,10 @@ uv run python examples/basic_pipeline.py
 ```bash
 uv run python examples/generate_sample.py \
     --persons 100000 --cities 500 --files 1000 \
-    --out big.ndjson
+    --out big.json
 
 # Pre-build the index once, then run as many queries as you like
-uv run subgraph index big.ndjson
-uv run subgraph query big.ndjson person
-uv run subgraph query big.ndjson city
+uv run subgraph index big.json
+uv run subgraph query big.json person
+uv run subgraph query big.json city
 ```
