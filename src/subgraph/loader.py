@@ -21,7 +21,7 @@ def _parse_raw_line(raw_line: bytes) -> dict:
 
     The source format is a JSON array whose elements look like::
 
-        {"typename": {"uuid": "...", "related": [...], ...}}
+        {"typename": {"Id": "...", "RelatedIds": [{"Value": "..."}, ...], ...}}
 
     This function strips any trailing comma (JSON array separator), parses the
     wrapper object, and returns ``{"type": typename, **fields}``.
@@ -106,14 +106,14 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
     with tqdm(desc="indexing", unit="rec", disable=not progress) as pbar:
         for offset, rec in _iter_raw_with_offset(src_path):
             try:
-                uuid, type_ = rec["uuid"], rec["type"]
+                uuid, type_ = rec["Id"], rec["type"]
             except (KeyError, TypeError) as exc:
                 raise ValueError(
                     f"record at byte offset {offset} is missing required field {exc}"
                 ) from exc
             node_buf.append((uuid, type_, offset, rec.get("timestamp")))
-            for dst in rec.get("related") or []:
-                edge_buf.append((uuid, dst))
+            for item in rec.get("RelatedIds") or []:
+                edge_buf.append((uuid, item["Value"]))
             if len(node_buf) >= _BUILD_BATCH:
                 _flush()
             pbar.update(1)
@@ -155,16 +155,17 @@ def _read_line_at(fh: BinaryIO, offset: int) -> bytes:
 def copy_records(
     src_path: str | Path, graph: Graph, out_fh: BinaryIO, *, progress: bool = False
 ) -> int:
-    """Copy the raw source bytes of every closure node to *out_fh* as NDJSON.
+    """Copy the raw source bytes of every closure node to *out_fh* as a JSON array.
 
     Records are located by their stored byte offset and copied verbatim — no
-    parse, no re-serialisation — so output is byte-identical to the source
-    lines.  Offsets are visited in ascending order for near-sequential I/O.
-    Returns the number of records written.
+    parse, no re-serialisation.  Offsets are visited in ascending order for
+    near-sequential I/O.  Output is a well-formed JSON array readable by
+    ``json.load``.  Returns the number of records written.
     """
     total = graph.closure_size()
     logger.info("copying %d records", total)
     written = 0
+    out_fh.write(b"[\n")
     with open(src_path, "rb") as fh:
         for offset in tqdm(
             graph.iter_closure_offsets(),
@@ -173,11 +174,12 @@ def copy_records(
             unit="rec",
             disable=not progress,
         ):
-            raw = _read_line_at(fh, offset)
-            # Strip trailing comma (JSON array separator) and normalize line ending.
-            raw = raw.strip().rstrip(b",") + b"\n"
+            raw = _read_line_at(fh, offset).strip().rstrip(b",")
+            if written > 0:
+                out_fh.write(b",\n")
             out_fh.write(raw)
             written += 1
+    out_fh.write(b"\n]\n")
     logger.info("wrote %d records", written)
     return written
 
@@ -200,9 +202,10 @@ def stream_nodes(src_path: str | Path, graph: Graph, *, progress: bool = False) 
             disable=not progress,
         ):
             rec = _parse_raw_line(_read_line_at(fh, offset))
+            related_ids = rec.pop("RelatedIds", None) or []
             yield Node(
                 type=rec.pop("type"),
-                uuid=rec.pop("uuid"),
-                related=list(rec.pop("related", None) or []),
+                uuid=rec.pop("Id"),
+                related=[item["Value"] for item in related_ids],
                 extra=rec,
             )

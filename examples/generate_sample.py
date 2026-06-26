@@ -47,21 +47,21 @@ def generate(
         # have k.  rng.sample is O(k), so generation stays O(persons * k)
         # rather than rebuilding an N-element exclude list per person.
         related = [u for u in rng.sample(all_uuids, k + 1) if u != uuid][:k]
-        fields: dict = {"uuid": uuid, "related": related}
+        fields: dict = {"Id": uuid, "RelatedIds": [{"Value": r} for r in related]}
         ts = random_timestamp()
         if ts:
             fields["timestamp"] = ts
         all_records.append({"person": fields})
 
     for uuid in city_uuids:
-        all_records.append({"city": {"uuid": uuid, "related": []}})
+        all_records.append({"city": {"Id": uuid, "RelatedIds": []}})
 
     for i, uuid in enumerate(file_uuids):
         all_records.append(
             {
                 "file": {
-                    "uuid": uuid,
-                    "related": [],
+                    "Id": uuid,
+                    "RelatedIds": [],
                     "path": f"/data/files/{i:05d}.bin",
                     "size_bytes": rng.randint(1024, 10 * 1024 * 1024),
                 }
