@@ -9,7 +9,7 @@ from typing import BinaryIO
 import orjson
 from tqdm import tqdm
 
-from .graph import Graph, Node
+from .graph import Graph, Node, guid_to_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -81,22 +81,22 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
         DROP TABLE IF EXISTS closure;
 
         CREATE TABLE nodes (
-            uuid TEXT NOT NULL, type TEXT NOT NULL,
-            offset INTEGER NOT NULL, timestamp TEXT
+            uuid BLOB NOT NULL, type TEXT NOT NULL,
+            offset INTEGER NOT NULL
         ) STRICT;
-        CREATE TABLE edges (src TEXT NOT NULL, dst TEXT NOT NULL) STRICT;
-        CREATE TABLE closure (uuid TEXT PRIMARY KEY) STRICT;
+        CREATE TABLE edges (src BLOB NOT NULL, dst BLOB NOT NULL) STRICT;
+        CREATE TABLE closure (uuid BLOB PRIMARY KEY) STRICT;
         """
     )
 
-    node_buf: list[tuple[str, str, int, str | None]] = []
-    edge_buf: list[tuple[str, str]] = []
+    node_buf: list[tuple[bytes, str, int]] = []
+    edge_buf: list[tuple[bytes, bytes]] = []
     batches_flushed = 0
 
     def _flush() -> None:
         nonlocal batches_flushed
         with db:
-            db.executemany("INSERT INTO nodes VALUES (?, ?, ?, ?)", node_buf)
+            db.executemany("INSERT INTO nodes VALUES (?, ?, ?)", node_buf)
             db.executemany("INSERT INTO edges VALUES (?, ?)", edge_buf)
         batches_flushed += 1
         logger.debug("flushed batch %d (%d nodes)", batches_flushed, len(node_buf))
@@ -111,9 +111,10 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
                 raise ValueError(
                     f"record at byte offset {offset} is missing required field {exc}"
                 ) from exc
-            node_buf.append((uuid, type_, offset, rec.get("timestamp")))
+            uuid_bytes = guid_to_bytes(uuid)
+            node_buf.append((uuid_bytes, type_, offset))
             for item in rec.get("RelatedIds") or []:
-                edge_buf.append((uuid, item["Value"]))
+                edge_buf.append((uuid_bytes, guid_to_bytes(item["Value"])))
             if len(node_buf) >= _BUILD_BATCH:
                 _flush()
             pbar.update(1)
@@ -136,7 +137,7 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
             )
             db.execute("CREATE UNIQUE INDEX idx_nodes_uuid ON nodes (uuid)")
     with db:
-        db.execute("CREATE INDEX idx_nodes_type_ts ON nodes (type, timestamp)")
+        db.execute("CREATE INDEX idx_nodes_type ON nodes (type)")
 
     node_count: int = db.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
     edge_count: int = db.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
@@ -181,6 +182,45 @@ def copy_records(
     out_fh.write(b"\n]\n")
     logger.info("wrote %d records", written)
     return written
+
+
+def _record_matches(rec: dict, where: list[tuple[str, str]]) -> bool:
+    """Return True iff *rec* exactly matches every ``(property, value)`` pair.
+
+    Values are compared as strings (the CLI supplies string values), so a
+    numeric field ``123`` matches ``"123"``.  A record missing the property
+    never matches.
+    """
+    return all(key in rec and str(rec[key]) == value for key, value in where)
+
+
+def iter_property_seed_uuids(
+    src_path: str | Path,
+    graph: Graph,
+    seed_type: str,
+    where: list[tuple[str, str]],
+    *,
+    progress: bool = False,
+) -> Iterator[str]:
+    """Yield the uuid of every *seed_type* node whose fields match *where*.
+
+    Streams the seed-type nodes in source-offset order, seeking to each one and
+    parsing only that line, so the bulk of a large source file is skipped and
+    memory stays bounded.  ``where`` is a list of ``(property, value)`` pairs
+    combined with AND (exact string equality).  The matching uuids are intended
+    to be fed into :meth:`Graph.apply_seed_filter`.
+    """
+    logger.info("scanning %r nodes for property filter %s", seed_type, where)
+    with open(src_path, "rb") as fh:
+        for uuid, offset in tqdm(
+            graph.iter_type_offsets(seed_type),
+            desc="filtering",
+            unit="rec",
+            disable=not progress,
+        ):
+            rec = _parse_raw_line(_read_line_at(fh, offset))
+            if _record_matches(rec, where):
+                yield uuid
 
 
 def estimate_output_bytes(src_path: str | Path, graph: Graph, *, progress: bool = False) -> int:

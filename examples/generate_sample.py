@@ -3,7 +3,6 @@
 Usage:
     uv run python examples/generate_sample.py                  # defaults
     uv run python examples/generate_sample.py --persons 50000 --out big.ndjson
-    uv run python examples/generate_sample.py --ts-start 2024-01-01 --ts-end 2024-12-31
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
-from datetime import UTC, datetime, timedelta
+import uuid
 
 
 def generate(
@@ -21,46 +20,36 @@ def generate(
     edges_per_person: int,
     seed: int,
     out_path: str,
-    ts_start: datetime | None,
-    ts_end: datetime | None,
 ) -> None:
     rng = random.Random(seed)
 
-    person_uuids = [f"person-{i:06d}" for i in range(persons)]
-    city_uuids = [f"city-{i:04d}" for i in range(cities)]
-    file_uuids = [f"file-{i:05d}" for i in range(files)]
+    def guid() -> str:
+        # Draw from the seeded RNG so output is reproducible for a given --seed.
+        return str(uuid.UUID(int=rng.getrandbits(128), version=4))
+
+    person_uuids = [guid() for _ in range(persons)]
+    city_uuids = [guid() for _ in range(cities)]
+    file_uuids = [guid() for _ in range(files)]
     all_uuids = person_uuids + city_uuids + file_uuids
-
-    ts_range_seconds = int((ts_end - ts_start).total_seconds()) if ts_start and ts_end else None
-
-    def random_timestamp() -> str | None:
-        if ts_start is None or ts_range_seconds is None:
-            return None
-        dt = ts_start + timedelta(seconds=rng.randint(0, ts_range_seconds))
-        return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     all_records: list[dict] = []
 
-    for uuid in person_uuids:
+    for uuid_ in person_uuids:
         k = min(edges_per_person, len(all_uuids) - 1)
         # Sample k+1 distinct uuids so we can drop self (if drawn) and still
         # have k.  rng.sample is O(k), so generation stays O(persons * k)
         # rather than rebuilding an N-element exclude list per person.
-        related = [u for u in rng.sample(all_uuids, k + 1) if u != uuid][:k]
-        fields: dict = {"Id": uuid, "RelatedIds": [{"Value": r} for r in related]}
-        ts = random_timestamp()
-        if ts:
-            fields["timestamp"] = ts
-        all_records.append({"person": fields})
+        related = [u for u in rng.sample(all_uuids, k + 1) if u != uuid_][:k]
+        all_records.append({"person": {"Id": uuid_, "RelatedIds": [{"Value": r} for r in related]}})
 
-    for uuid in city_uuids:
-        all_records.append({"city": {"Id": uuid, "RelatedIds": []}})
+    for uuid_ in city_uuids:
+        all_records.append({"city": {"Id": uuid_, "RelatedIds": []}})
 
-    for i, uuid in enumerate(file_uuids):
+    for i, uuid_ in enumerate(file_uuids):
         all_records.append(
             {
                 "file": {
-                    "Id": uuid,
+                    "Id": uuid_,
                     "RelatedIds": [],
                     "path": f"/data/files/{i:05d}.bin",
                     "size_bytes": rng.randint(1024, 10 * 1024 * 1024),
@@ -79,12 +68,6 @@ def generate(
 
     print(f"wrote {written} records to {out_path}")
     print(f"  {persons} persons, {cities} cities, {files} files")
-    if ts_start and ts_end:
-        print(f"  timestamps: {ts_start.date()} – {ts_end.date()}")
-
-
-def _parse_date(value: str) -> datetime:
-    return datetime.fromisoformat(value).replace(tzinfo=UTC)
 
 
 def main() -> None:
@@ -95,20 +78,6 @@ def main() -> None:
     parser.add_argument("--edges-per-person", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out", default="examples/sample.ndjson")
-    parser.add_argument(
-        "--ts-start",
-        metavar="DATE",
-        type=_parse_date,
-        default=None,
-        help="Start of random timestamp range for person nodes (e.g. 2024-01-01)",
-    )
-    parser.add_argument(
-        "--ts-end",
-        metavar="DATE",
-        type=_parse_date,
-        default=None,
-        help="End of random timestamp range for person nodes (e.g. 2024-12-31)",
-    )
     args = parser.parse_args()
 
     generate(
@@ -118,8 +87,6 @@ def main() -> None:
         edges_per_person=args.edges_per_person,
         seed=args.seed,
         out_path=args.out,
-        ts_start=args.ts_start,
-        ts_end=args.ts_end,
     )
 
 

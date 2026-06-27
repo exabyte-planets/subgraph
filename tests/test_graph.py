@@ -1,21 +1,39 @@
 import json
+import sqlite3
 import subprocess
 import sys
 
 import pytest
 
-from subgraph import Graph, Node, build_index, copy_records, estimate_output_bytes, stream_nodes
+from subgraph import (
+    Graph,
+    Node,
+    build_index,
+    copy_records,
+    estimate_output_bytes,
+    iter_property_seed_uuids,
+    stream_nodes,
+)
+from subgraph.graph import bytes_to_guid, guid_to_bytes
 
 SAMPLE = "tests/data/sample.json"
+
+# Node ids are GUID4s.  These constants mirror the ids in tests/data/sample.json
+# so the assertions below stay readable.
+A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+C = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+D = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+E = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 
 #
 #  Sample graph:
 #
-#  A (person, timestamp=2024-03-01T10:00:00Z) -> B, C, E
-#  B (person, timestamp=2024-06-15T10:00:00Z) -> D
-#  C (city,   no timestamp)                   -> (none)
-#  D (city,   no timestamp)                   -> (none)
-#  E (file,   no timestamp)                   -> (none)  extra: path="tests/data/sample.data"
+#  A (person, Name=Alice) -> B, C, E
+#  B (person, Name=Bob)   -> D
+#  C (city,   Place=City C) -> (none)
+#  D (city,   Place=City D) -> (none)
+#  E (file,   FileName=Sample File) -> (none)  extra: path="tests/data/sample.data"
 
 
 # ------------------------------------------------------------------ #
@@ -50,6 +68,65 @@ def test_index_rebuild_is_clean(tmp_path):
 
 
 # ------------------------------------------------------------------ #
+# Edge index                                                          #
+# ------------------------------------------------------------------ #
+#
+#  Edges from the sample: A->B, A->C, A->E, B->D.  Cities and the file node
+#  have no outgoing edges.  These tests guard against a regression where the
+#  edges table came up empty after an index build.
+
+
+def test_edges_created_in_db(tmp_path):
+    db_path = tmp_path / "edges.db"
+    build_index(SAMPLE, db_path)
+    con = sqlite3.connect(db_path)
+    try:
+        count = con.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        edges = {
+            (bytes_to_guid(src), bytes_to_guid(dst))
+            for src, dst in con.execute("SELECT src, dst FROM edges")
+        }
+    finally:
+        con.close()
+    assert count == 4
+    assert edges == {(A, B), (A, C), (A, E), (B, D)}
+
+
+def test_edges_stored_as_16_byte_blobs(tmp_path):
+    # GUID4 ids are stored as their compact 16-byte form, not as text.
+    db_path = tmp_path / "blob.db"
+    build_index(SAMPLE, db_path)
+    con = sqlite3.connect(db_path)
+    try:
+        src, dst = con.execute("SELECT src, dst FROM edges LIMIT 1").fetchone()
+        (uuid,) = con.execute("SELECT uuid FROM nodes LIMIT 1").fetchone()
+    finally:
+        con.close()
+    for value in (src, dst, uuid):
+        assert isinstance(value, bytes)
+        assert len(value) == 16
+
+
+def test_node_with_edges_produces_edge_rows(tmp_path):
+    # A single person with two RelatedIds must yield exactly two edge rows.
+    src = tmp_path / "two.ndjson"
+    src.write_text(
+        "[\n"
+        + json.dumps({"person": {"Id": A, "RelatedIds": [{"Value": B}, {"Value": C}]}})
+        + "\n]\n"
+    )
+    db_path = tmp_path / "two.db"
+    build_index(src, db_path)
+    con = sqlite3.connect(db_path)
+    try:
+        rows = con.execute("SELECT dst FROM edges WHERE src = ?", (guid_to_bytes(A),))
+        dsts = {bytes_to_guid(d) for (d,) in rows}
+    finally:
+        con.close()
+    assert dsts == {B, C}
+
+
+# ------------------------------------------------------------------ #
 # Transitive closure — seed type "person"                             #
 # ------------------------------------------------------------------ #
 #
@@ -64,7 +141,7 @@ def test_person_closure_count(db):
 
 def test_person_closure_uuids(db):
     db.transitive_closure("person")
-    assert set(db.iter_closure_uuids()) == set("ABCDE")
+    assert set(db.iter_closure_uuids()) == {A, B, C, D, E}
 
 
 # ------------------------------------------------------------------ #
@@ -80,7 +157,7 @@ def test_city_closure_count(db):
 
 def test_city_closure_uuids(db):
     db.transitive_closure("city")
-    assert set(db.iter_closure_uuids()) == {"C", "D"}
+    assert set(db.iter_closure_uuids()) == {C, D}
 
 
 # ------------------------------------------------------------------ #
@@ -95,21 +172,24 @@ def test_unknown_type_empty(db):
 def test_closure_replaced_on_second_call(db):
     db.transitive_closure("person")
     db.transitive_closure("city")
-    assert set(db.iter_closure_uuids()) == {"C", "D"}
+    assert set(db.iter_closure_uuids()) == {C, D}
 
 
 def test_dangling_related_in_closure(tmp_path):
+    # A related id that has no node row of its own is still reachable.
+    node = "11111111-1111-4111-8111-111111111111"
+    missing = "22222222-2222-4222-8222-222222222222"
     data_file = tmp_path / "dangle.ndjson"
     data_file.write_text(
-        "[\n" + json.dumps({"person": {"Id": "X", "RelatedIds": [{"Value": "MISSING"}]}}) + "\n]\n"
+        "[\n" + json.dumps({"person": {"Id": node, "RelatedIds": [{"Value": missing}]}}) + "\n]\n"
     )
     db_path = tmp_path / "dangle.db"
     build_index(data_file, db_path)
     with Graph(db_path) as g:
         g.transitive_closure("person")
         closure = set(g.iter_closure_uuids())
-    assert "X" in closure
-    assert "MISSING" in closure  # reachable even though absent from nodes table
+    assert node in closure
+    assert missing in closure  # reachable even though absent from nodes table
 
 
 # ------------------------------------------------------------------ #
@@ -125,14 +205,14 @@ def test_stream_nodes_count(db):
 def test_stream_nodes_extra_fields(db):
     db.transitive_closure("person")
     nodes = list(stream_nodes(SAMPLE, db))
-    e = next(n for n in nodes if n.uuid == "E")
+    e = next(n for n in nodes if n.uuid == E)
     assert e.extra.get("path") == "tests/data/sample.data"
 
 
 def test_stream_nodes_city_only(db):
     db.transitive_closure("city")
     nodes = list(stream_nodes(SAMPLE, db))
-    assert {n.uuid for n in nodes} == {"C", "D"}
+    assert {n.uuid for n in nodes} == {C, D}
 
 
 def test_stream_nodes_returns_node_objects(db):
@@ -172,7 +252,7 @@ def test_copy_records_subset_lines(db, tmp_path):
         copy_records(SAMPLE, db, fh)
     records = json.loads(out.read_text())
     uuids = {next(iter(rec.values()))["Id"] for rec in records}
-    assert uuids == {"C", "D"}
+    assert uuids == {C, D}
 
 
 def test_copy_records_preserves_extra_fields(db, tmp_path):
@@ -181,60 +261,13 @@ def test_copy_records_preserves_extra_fields(db, tmp_path):
     with open(out, "wb") as fh:
         copy_records(SAMPLE, db, fh)
     records = [next(iter(rec.values())) for rec in json.loads(out.read_text())]
-    e = next(r for r in records if r["Id"] == "E")
+    e = next(r for r in records if r["Id"] == E)
     assert e["path"] == "tests/data/sample.data"
 
 
 # ------------------------------------------------------------------ #
-# Timestamp filtering                                                   #
+# Index build edge cases                                              #
 # ------------------------------------------------------------------ #
-#
-#  No filter   → seeds {A, B} → closure {A,B,C,D,E}
-#  after=2024-04-01 → only B qualifies → closure {B, D}
-#  before=2024-04-01 → only A qualifies → closure {A,B,C,D,E} (A reaches B)
-#  after=2025-01-01 → no seeds → empty closure
-#  after+before spanning both → seeds {A,B} → closure {A,B,C,D,E}
-#  filter on city (no timestamps) → no seeds → empty
-
-
-def test_timestamp_no_filter_unchanged(db):
-    assert db.transitive_closure("person") == 5
-
-
-def test_timestamp_after_excludes_early_seed(db):
-    # only B (2024-06-15) qualifies; A (2024-03-01) is filtered out
-    count = db.transitive_closure("person", after="2024-04-01T00:00:00Z")
-    assert count == 2
-    assert set(db.iter_closure_uuids()) == {"B", "D"}
-
-
-def test_timestamp_before_excludes_late_seed(db):
-    # only A (2024-03-01) qualifies; A reaches everything
-    count = db.transitive_closure("person", before="2024-04-01T00:00:00Z")
-    assert count == 5
-    assert set(db.iter_closure_uuids()) == set("ABCDE")
-
-
-def test_timestamp_after_no_match(db):
-    assert db.transitive_closure("person", after="2025-01-01T00:00:00Z") == 0
-
-
-def test_timestamp_range_both_seeds(db):
-    count = db.transitive_closure(
-        "person", after="2024-01-01T00:00:00Z", before="2024-12-31T23:59:59Z"
-    )
-    assert count == 5
-
-
-def test_timestamp_null_nodes_excluded_by_filter(db):
-    # cities have no timestamp — applying any filter excludes them from seeds
-    assert db.transitive_closure("city", after="2024-01-01T00:00:00Z") == 0
-
-
-def test_timestamp_null_nodes_still_reachable(db):
-    # cities have no timestamp but are reachable via person A's edges
-    db.transitive_closure("person", before="2024-04-01T00:00:00Z")
-    assert "C" in set(db.iter_closure_uuids())  # reached from A, not seeded itself
 
 
 def test_duplicate_uuid_keeps_last_occurrence(tmp_path):
@@ -243,9 +276,9 @@ def test_duplicate_uuid_keeps_last_occurrence(tmp_path):
     src = tmp_path / "dup.ndjson"
     src.write_text(
         "[\n"
-        + json.dumps({"person": {"Id": "A", "RelatedIds": [], "v": 1}})
+        + json.dumps({"person": {"Id": A, "RelatedIds": [], "v": 1}})
         + ",\n"
-        + json.dumps({"person": {"Id": "A", "RelatedIds": [], "v": 2}})
+        + json.dumps({"person": {"Id": A, "RelatedIds": [], "v": 2}})
         + "\n"
         + "]\n"
     )
@@ -265,7 +298,7 @@ def test_build_index_reports_offset_for_bad_record(tmp_path):
     src = tmp_path / "bad.ndjson"
     src.write_text(
         "[\n"
-        + json.dumps({"person": {"Id": "A", "RelatedIds": []}})
+        + json.dumps({"person": {"Id": A, "RelatedIds": []}})
         + ",\n"
         + json.dumps({"person": {"RelatedIds": []}})
         + "\n"  # missing Id
@@ -280,7 +313,7 @@ def test_copy_records_appends_missing_newline(tmp_path):
     # A source whose last line has no trailing newline must still produce
     # newline-terminated NDJSON output.
     src = tmp_path / "no_newline.ndjson"
-    src.write_bytes(b'[\n{"person": {"Id": "A", "RelatedIds": []}}')
+    src.write_bytes(b'[\n{"person": {"Id": "' + A.encode() + b'", "RelatedIds": []}}')
     db_path = tmp_path / "nn.db"
     build_index(src, db_path)
     out = tmp_path / "out.ndjson"
@@ -337,14 +370,67 @@ def test_count_type_unknown_returns_zero(db):
     assert db.count_type("widget") == 0
 
 
-def test_count_type_with_after_filter(db):
-    # only B (2024-06-15) qualifies when seeding after 2024-04-01
-    assert db.count_type("person", after="2024-04-01T00:00:00Z") == 1
+# ------------------------------------------------------------------ #
+# Property seed filter                                                 #
+# ------------------------------------------------------------------ #
+#
+#  Seeds chosen by matching a property value, then BFS expands as usual.
+#  Name=Alice → seed {A} → closure {A,B,C,D,E}
+#  Name=Bob   → seed {B} → closure {B,D}
+#  Name=Nobody → no seeds → empty closure
 
 
-def test_count_type_with_before_filter(db):
-    # only A (2024-03-01) qualifies before 2024-04-01
-    assert db.count_type("person", before="2024-04-01T00:00:00Z") == 1
+def test_iter_property_seed_uuids_alice(db):
+    assert list(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Alice")])) == [A]
+
+
+def test_iter_property_seed_uuids_no_match(db):
+    assert list(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Nobody")])) == []
+
+
+def test_property_filter_seeds_only_matching(db):
+    db.apply_seed_filter(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Bob")]))
+    count = db.transitive_closure("person")
+    assert count == 2
+    assert set(db.iter_closure_uuids()) == {B, D}
+
+
+def test_property_filter_alice_full_closure(db):
+    db.apply_seed_filter(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Alice")]))
+    assert db.transitive_closure("person") == 5
+    assert set(db.iter_closure_uuids()) == {A, B, C, D, E}
+
+
+def test_property_filter_no_match_empty_closure(db):
+    db.apply_seed_filter(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Nobody")]))
+    assert db.transitive_closure("person") == 0
+
+
+def test_property_filter_count_type_respects_filter(db):
+    db.apply_seed_filter(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Bob")]))
+    assert db.count_type("person") == 1
+
+
+def test_property_filter_missing_property_excludes(db):
+    # cities have no "Name" field, so a Name filter matches none of them
+    db.apply_seed_filter(iter_property_seed_uuids(SAMPLE, db, "city", [("Name", "Alice")]))
+    assert db.transitive_closure("city") == 0
+
+
+def test_property_filter_reapply_replaces(db):
+    db.apply_seed_filter(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Alice")]))
+    db.apply_seed_filter(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Bob")]))
+    db.transitive_closure("person")
+    assert set(db.iter_closure_uuids()) == {B, D}
+
+
+def test_property_filter_multiple_where_and(db):
+    # Both conditions true for A → seeds {A}
+    seeds = list(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Alice"), ("Id", A)]))
+    assert seeds == [A]
+    # Conflicting conditions → no match
+    none = list(iter_property_seed_uuids(SAMPLE, db, "person", [("Name", "Alice"), ("Id", B)]))
+    assert none == []
 
 
 # ------------------------------------------------------------------ #
@@ -371,7 +457,7 @@ def test_cli_max_records_passes(tmp_path):
 
 
 def test_cli_default_max_records_allows_small_closure(tmp_path):
-    # sample has 5 nodes — well under the 5 M default
+    # sample has 5 nodes — well under the 4 M default
     out = tmp_path / "out.json"
     result = _run_query([SAMPLE, "person", str(out)], tmp_path)
     assert result.returncode == 0
@@ -405,4 +491,28 @@ def test_cli_max_bytes_blocks(tmp_path):
         tmp_path,
     )
     assert result.returncode == 1
+    assert not out.exists()
+
+
+def test_cli_where_filters_seeds(tmp_path):
+    # --where Name=Bob seeds only B → closure {B, D}
+    out = tmp_path / "out.json"
+    result = _run_query([SAMPLE, "person", str(out), "--where", "Name=Bob"], tmp_path)
+    assert result.returncode == 0
+    records = json.loads(out.read_text())
+    uuids = {next(iter(rec.values()))["Id"] for rec in records}
+    assert uuids == {B, D}
+
+
+def test_cli_where_no_match_empty_output(tmp_path):
+    out = tmp_path / "out.json"
+    result = _run_query([SAMPLE, "person", str(out), "--where", "Name=Nobody"], tmp_path)
+    assert result.returncode == 0
+    assert json.loads(out.read_text()) == []
+
+
+def test_cli_where_invalid_format_errors(tmp_path):
+    out = tmp_path / "out.json"
+    result = _run_query([SAMPLE, "person", str(out), "--where", "Name"], tmp_path)
+    assert result.returncode == 2  # argparse usage error
     assert not out.exists()

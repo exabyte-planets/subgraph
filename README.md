@@ -21,27 +21,6 @@ saves time:
 index   → streams source → SQLite (uuid, type, offset, edges)
 ```
 
-## Data format
-
-Source files must be **JSON** with one JSON object per line:
-
-```json
-[
-{"type": "person", "Id": "alice", "RelatedIds": ["bob", "sf-office"]}
-{"type": "person", "Id": "bob",   "RelatedIds": ["nyc-office"]}
-{"type": "city",   "Id": "sf-office",  "RelatedIds": []}
-{"type": "city",   "Id": "nyc-office", "RelatedIds": []}
-]
-```
-
-Every record needs `type` (string), `Id` (string), and `RelatedIds` (list of
-UUID strings). All other fields are preserved verbatim in the output.
-
-An optional `timestamp` field (ISO 8601 string) on any record enables
-time-range filtering of BFS seeds via `--after` / `--before`.  Records
-without `timestamp` are valid and simply excluded from seeding when a filter
-is active.
-
 ## Installation
 
 ```bash
@@ -66,18 +45,27 @@ Pass an explicit output path as a third argument to override the default:
 uv run subgraph query data.json person output/subset.json
 ```
 
-Optionally filter which seed nodes start the BFS by their `timestamp` field:
+Optionally filter which seed nodes start the BFS by an exact property value with
+`--where PROPERTY=VALUE`:
 
 ```bash
-# Only seed from persons active in Q1 2024
-uv run subgraph query data.json person \
-    --after 2024-01-01T00:00:00Z \
-    --before 2024-03-31T23:59:59Z
+# Seed the closure from the person named Alice, then expand as usual
+uv run subgraph query data.json person --where Name=Alice
 ```
 
-`--after` and `--before` are both optional ISO 8601 strings.  Nodes without a
-`timestamp` field are excluded from seeding when either bound is present, but
-remain reachable as non-seed nodes in the closure.
+`--where` is repeatable; multiple filters are combined with **AND**:
+
+```bash
+# Seed only persons named Alice who live in SF
+uv run subgraph query data.json person --where Name=Alice --where City=SF
+```
+
+Matching is exact string equality.  Arbitrary properties are **not** stored in
+the index, so `--where` re-reads each seed-type record from the source file to
+test it — cost is one seek per node of the seed type, and no reindex is
+required.  Records missing the property never match.  Only the **seeds** are
+filtered; nodes pulled in by following edges are kept regardless of their own
+property values.
 
 ### Closure statistics
 
@@ -89,7 +77,7 @@ closure stats — seed type: 'person' | seeds: 2 | expansion: +3 | closure: 5 / 
 
 | Field | Meaning |
 |---|---|
-| `seeds` | Nodes of the requested type that seeded the BFS (respects `--after`/`--before`) |
+| `seeds` | Nodes of the requested type that seeded the BFS (respects `--where`) |
 | `expansion` | Additional nodes pulled in by following edges |
 | `closure / graph` | Output record count and its share of all indexed nodes |
 
@@ -134,13 +122,6 @@ uv run subgraph index data.json
 
 This writes `data.db` alongside `data.json`.  Re-running rebuilds from
 scratch.
-
-> **Note:** timestamps are compared lexicographically (as text), not as
-> instants. Range filtering is therefore only correct when every record's
-> `timestamp` and the supplied bounds share one fixed format — same UTC
-> representation (e.g. all `...Z`), same precision, no mixing of `Z` with
-> `+00:00` offsets. The `generate_sample.py` helper emits a consistent
-> `%Y-%m-%dT%H:%M:%SZ` format suitable for this.
 
 ## Python API
 

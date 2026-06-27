@@ -1,12 +1,17 @@
 import argparse
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from tqdm.contrib.logging import logging_redirect_tqdm
 
-from subgraph import Graph, build_index, copy_records, estimate_output_bytes
+from subgraph import (
+    Graph,
+    build_index,
+    copy_records,
+    estimate_output_bytes,
+    iter_property_seed_uuids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,13 +25,15 @@ def _configure_logging() -> None:
     )
 
 
-def _iso8601(value: str) -> str:
-    """argparse type: validate that *value* is a parseable ISO 8601 string."""
-    try:
-        datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"not a valid ISO 8601 datetime: {value!r}") from None
-    return value
+def _where(value: str) -> tuple[str, str]:
+    """argparse type: parse a ``PROPERTY=VALUE`` seed filter into a pair.
+
+    Splits on the first ``=`` so values may themselves contain ``=``.
+    """
+    key, sep, val = value.partition("=")
+    if not sep or not key:
+        raise argparse.ArgumentTypeError(f"--where must be PROPERTY=VALUE, got {value!r}")
+    return key, val
 
 
 def _db_for(file: Path) -> Path:
@@ -63,15 +70,21 @@ def cmd_query(args: argparse.Namespace) -> None:
     )
 
     with Graph(db) as g, logging_redirect_tqdm():
-        g.transitive_closure(
-            args.seed_type,
-            after=args.after,
-            before=args.before,
-            progress=True,
-        )
+        if args.where:
+            matched = g.apply_seed_filter(
+                iter_property_seed_uuids(file, g, args.seed_type, args.where, progress=True)
+            )
+            logger.info(
+                "property filter %s matched %d %r node(s)",
+                " AND ".join(f"{k}={v}" for k, v in args.where),
+                matched,
+                args.seed_type,
+            )
+
+        g.transitive_closure(args.seed_type, progress=True)
 
         total_nodes = len(g)
-        seed_count = g.count_type(args.seed_type, after=args.after, before=args.before)
+        seed_count = g.count_type(args.seed_type)
         record_count = g.closure_size()
         expansion = record_count - seed_count
         coverage = 100.0 * record_count / total_nodes if total_nodes else 0.0
@@ -131,18 +144,15 @@ def main() -> None:
         help="Output path (default: <stem>_<seed_type>.json next to the input file)",
     )
     p_query.add_argument(
-        "--after",
-        metavar="ISO8601",
-        type=_iso8601,
+        "--where",
+        metavar="PROPERTY=VALUE",
+        type=_where,
+        action="append",
         default=None,
-        help="Only seed nodes whose timestamp >= this value (ISO 8601)",
-    )
-    p_query.add_argument(
-        "--before",
-        metavar="ISO8601",
-        type=_iso8601,
-        default=None,
-        help="Only seed nodes whose timestamp <= this value (ISO 8601)",
+        help=(
+            "Only seed nodes whose PROPERTY exactly equals VALUE. Repeatable;"
+            " multiple --where filters are combined with AND."
+        ),
     )
     p_query.add_argument(
         "--max-records",
