@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import uuid as uuidlib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,10 +10,8 @@ from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
-# Node ids are GUID4s.  Storing them as canonical 36-char TEXT would waste 20
-# bytes per id across nodes, edges (×2) and the closure — significant at graph
-# scale.  We store the 16-byte big-endian form instead and convert at the
-# Python boundary, so the public API still speaks canonical GUID strings.
+# Node ids are 32-char hex strings stored as their 16-byte binary form to save
+# space across nodes, edges (×2) and the closure — significant at graph scale.
 _SCHEMA = """\
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous  = NORMAL;
@@ -41,13 +38,13 @@ CREATE TABLE IF NOT EXISTS closure (
 
 
 def guid_to_bytes(guid: str) -> bytes:
-    """Convert a canonical GUID4 string to its 16-byte form for storage."""
-    return uuidlib.UUID(guid).bytes
+    """Convert a 32-char hex id string to its 16-byte form for storage."""
+    return bytes.fromhex(guid)
 
 
 def bytes_to_guid(raw: bytes) -> str:
-    """Convert a stored 16-byte id back to its canonical GUID4 string."""
-    return str(uuidlib.UUID(bytes=raw))
+    """Convert a stored 16-byte id back to its 32-char hex string."""
+    return raw.hex()
 
 
 @dataclass
