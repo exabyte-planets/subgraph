@@ -18,13 +18,13 @@ from subgraph.graph import bytes_to_guid, guid_to_bytes
 
 SAMPLE = "tests/data/sample.json"
 
-# Node ids are GUID4s.  These constants mirror the ids in tests/data/sample.json
-# so the assertions below stay readable.
-A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-C = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-D = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
-E = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+# Node ids are 32-char hex strings.  These constants mirror the ids in
+# tests/data/sample.json so the assertions below stay readable.
+A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+C = "cccccccccccccccccccccccccccccccc"
+D = "dddddddddddddddddddddddddddddddd"
+E = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 #
 #  Sample graph:
@@ -177,8 +177,8 @@ def test_closure_replaced_on_second_call(db):
 
 def test_dangling_related_in_closure(tmp_path):
     # A related id that has no node row of its own is still reachable.
-    node = "11111111-1111-4111-8111-111111111111"
-    missing = "22222222-2222-4222-8222-222222222222"
+    node = "11111111111111111111111111111111"
+    missing = "22222222222222222222222222222222"
     data_file = tmp_path / "dangle.ndjson"
     data_file.write_text(
         "[\n" + json.dumps({"person": {"Id": node, "RelatedIds": [{"Value": missing}]}}) + "\n]\n"
