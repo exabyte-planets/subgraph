@@ -13,7 +13,7 @@ from subgraph import (
     iter_property_seed_uuids,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("subgraph")
 
 
 def _configure_logging() -> None:
