@@ -1,0 +1,56 @@
+name: Release (Windows exe)
+
+# Builds a standalone subgraph.exe that runs on Windows with no Python or
+# packages installed. PyInstaller cannot cross-compile, so this must run on a
+# Windows runner. Triggered on version tags (attaches the exe to the GitHub
+# release) and manually via the Actions tab (uploads it as a build artifact).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to attach the exe to the release on a tag push
+
+jobs:
+  build-windows:
+    name: Build standalone subgraph.exe
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      # Install the project + locked deps (orjson, tqdm) into the venv so the
+      # frozen exe contains exactly what CI tests against.
+      - run: uv sync --frozen
+
+      # --with adds PyInstaller for this run only, keeping it out of uv.lock.
+      # --collect-submodules tqdm pulls in tqdm.contrib.logging, which the CLI
+      # imports lazily and PyInstaller's static analysis can otherwise miss.
+      - name: Build onefile exe
+        run: >
+          uv run --with pyinstaller pyinstaller
+          --onefile
+          --name subgraph
+          --collect-submodules tqdm
+          src/subgraph/__main__.py
+
+      # Confirm the bundle actually launches (catches missing hidden imports).
+      - name: Smoke test
+        shell: cmd
+        run: dist\subgraph.exe --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subgraph-windows-x64
+          path: dist/subgraph.exe
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/subgraph.exe

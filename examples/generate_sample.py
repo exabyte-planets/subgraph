@@ -25,7 +25,7 @@ def generate(
 
     def guid() -> str:
         # Draw from the seeded RNG so output is reproducible for a given --seed.
-        return str(uuid.UUID(int=rng.getrandbits(128), version=4))
+        return str(uuid.UUID(int=rng.getrandbits(128), version=4)).replace("-", "")
 
     person_uuids = [guid() for _ in range(persons)]
     city_uuids = [guid() for _ in range(cities)]
