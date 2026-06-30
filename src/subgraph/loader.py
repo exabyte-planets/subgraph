@@ -4,7 +4,7 @@ import logging
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
 
 import orjson
 from tqdm import tqdm
@@ -26,11 +26,26 @@ def _parse_raw_line(raw_line: bytes) -> dict:
 
     This function strips any trailing comma (JSON array separator), parses the
     wrapper object, and returns ``{"type": typename, **fields}``.
+
+    Raises :class:`ValueError` (without a byte offset — the caller adds that) on a
+    line that is not valid JSON, not a non-empty object, or whose type value is
+    not itself an object.
     """
     json_bytes = raw_line.strip().rstrip(b",")
-    wrapper: dict = orjson.loads(json_bytes)
+    try:
+        wrapper = orjson.loads(json_bytes)
+    except orjson.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON: {exc}") from exc
+
+    if not isinstance(wrapper, dict) or not wrapper:
+        raise ValueError("record must be a non-empty object keyed by type name")
+
     type_ = next(iter(wrapper))
-    return {"type": type_, **wrapper[type_]}
+    fields = wrapper[type_]
+
+    if not isinstance(fields, dict):
+        raise ValueError(f"value for type {type_!r} must be an object, got {type(fields).__name__}")
+    return {"type": type_, **fields}
 
 
 def _iter_raw_with_offset(src: Source) -> Iterator[tuple[int, dict]]:
@@ -47,8 +62,54 @@ def _iter_raw_with_offset(src: Source) -> Iterator[tuple[int, dict]]:
         for raw_line in fh:
             stripped = raw_line.strip()
             if stripped and stripped not in (b"[", b"]"):
-                yield offset, _parse_raw_line(raw_line)
+                try:
+                    rec = _parse_raw_line(raw_line)
+                except ValueError as exc:
+                    raise ValueError(f"record at byte offset {offset}: {exc}") from exc
+                yield offset, rec
             offset += len(raw_line)
+
+
+def _guid_bytes(value: object, field: str) -> bytes:
+    """Convert *value* to its 16-byte id form, naming *field* on failure."""
+    try:
+        # value may be any JSON type here; a non-str raises TypeError below.
+        return guid_to_bytes(cast(str, value))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"invalid {field} {value!r}: {exc}") from exc
+
+
+def _validate_record(rec: dict) -> tuple[bytes, str, list[bytes]]:
+    """Extract ``(uuid_bytes, type, [dst_bytes, ...])`` from a parsed record.
+
+    Raises :class:`ValueError` describing the problem (without the byte offset,
+    which the caller adds) when a required field is missing, an id is not a valid
+    32-char hex string, or ``RelatedIds`` is not a list of ``{"Value": ...}``
+    objects.
+    """
+    try:
+        uuid, type_ = rec["Id"], rec["type"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"missing required field {exc}") from exc
+
+    uuid_bytes = _guid_bytes(uuid, "Id")
+
+    related = rec.get("RelatedIds")
+
+    if related is None:
+        related = []
+    elif not isinstance(related, list):
+        raise ValueError(f"RelatedIds must be a list, got {type(related).__name__}")
+
+    dsts: list[bytes] = []
+    for i, item in enumerate(related):
+        if not isinstance(item, dict) or "Value" not in item:
+            raise ValueError(
+                f"RelatedIds[{i}] must be an object with a 'Value' field, got {item!r}"
+            )
+        dsts.append(_guid_bytes(item["Value"], f"RelatedIds[{i}].Value"))
+
+    return uuid_bytes, type_, dsts
 
 
 def build_index(src_path: Source, db_path: str | Path, *, progress: bool = False) -> None:
@@ -108,15 +169,13 @@ def build_index(src_path: Source, db_path: str | Path, *, progress: bool = False
     with tqdm(desc="indexing", unit="rec", disable=not progress) as pbar:
         for offset, rec in _iter_raw_with_offset(spec):
             try:
-                uuid, type_ = rec["Id"], rec["type"]
-            except (KeyError, TypeError) as exc:
-                raise ValueError(
-                    f"record at byte offset {offset} is missing required field {exc}"
-                ) from exc
-            uuid_bytes = guid_to_bytes(uuid)
+                uuid_bytes, type_, dsts = _validate_record(rec)
+            except ValueError as exc:
+                raise ValueError(f"record at byte offset {offset}: {exc}") from exc
+
             node_buf.append((uuid_bytes, type_, offset))
-            for item in rec.get("RelatedIds") or []:
-                edge_buf.append((uuid_bytes, guid_to_bytes(item["Value"])))
+            edge_buf.extend((uuid_bytes, dst) for dst in dsts)
+
             if len(node_buf) >= _BUILD_BATCH:
                 _flush()
             pbar.update(1)
