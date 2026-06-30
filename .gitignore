@@ -11,3 +11,7 @@ wheels/
 
 # Generated SQLite indexes
 *.db
+
+# AI
+.claude
+CLAUDE.md
