@@ -1,16 +1,18 @@
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 from tqdm.contrib.logging import logging_redirect_tqdm
 
 from subgraph import (
     Graph,
+    SourceSpec,
     build_index,
     copy_records,
+    db_path_for,
     estimate_output_bytes,
     iter_property_seed_uuids,
+    open_output,
 )
 
 logger = logging.getLogger("subgraph")
@@ -36,15 +38,11 @@ def _where(value: str) -> tuple[str, str]:
     return key, val
 
 
-def _db_for(file: Path) -> Path:
-    return file.with_suffix(".db")
-
-
 def cmd_index(args: argparse.Namespace) -> None:
-    file = Path(args.file)
-    db = _db_for(file)
+    spec = SourceSpec.parse(args.file)
+    db = db_path_for(spec)
     with logging_redirect_tqdm():
-        build_index(file, db, progress=True)
+        build_index(spec, db, progress=True)
     with Graph(db) as g:
         logger.info("index ready: %d nodes in %s", len(g), db)
 
@@ -57,22 +55,22 @@ def _fmt_bytes(n: int) -> str:
 
 
 def cmd_query(args: argparse.Namespace) -> None:
-    file = Path(args.file)
-    db = _db_for(file)
+    spec = SourceSpec.parse(args.file)
+    db = db_path_for(spec)
 
     if not db.exists():
         logger.info("index %s not found — building now", db)
         with logging_redirect_tqdm():
-            build_index(file, db, progress=True)
+            build_index(spec, db, progress=True)
 
-    output = (
-        Path(args.output) if args.output else file.with_name(f"{file.stem}_{args.seed_type}.json")
-    )
+    # Keep the output as a raw string so a compressed target (``out.json.gz`` or
+    # ``out.zip::member``) survives to open_output instead of being normalised away.
+    output = args.output or str(spec.path.with_name(f"{spec.path.stem}_{args.seed_type}.json"))
 
     with Graph(db) as g, logging_redirect_tqdm():
         if args.where:
             matched = g.apply_seed_filter(
-                iter_property_seed_uuids(file, g, args.seed_type, args.where, progress=True)
+                iter_property_seed_uuids(spec, g, args.seed_type, args.where, progress=True)
             )
             logger.info(
                 "property filter %s matched %d %r node(s)",
@@ -109,7 +107,9 @@ def cmd_query(args: argparse.Namespace) -> None:
             sys.exit(1)
 
         if args.max_bytes is not None:
-            estimated = estimate_output_bytes(file, g, progress=True)
+            # Estimates the uncompressed JSON payload; with a compressed output
+            # target the file on disk is smaller, so this stays a safe bound.
+            estimated = estimate_output_bytes(spec, g, progress=True)
             if estimated > args.max_bytes:
                 logger.error(
                     "estimated output size %s exceeds --max-bytes %s; aborting",
@@ -119,8 +119,8 @@ def cmd_query(args: argparse.Namespace) -> None:
                 sys.exit(1)
             logger.info("estimated output size: %s (within limit)", _fmt_bytes(estimated))
 
-        with open(output, "wb") as fh:
-            count = copy_records(file, g, fh, progress=True)
+        with open_output(output) as fh:
+            count = copy_records(spec, g, fh, progress=True)
     logger.info("wrote %d records to %s", count, output)
 
 
@@ -131,17 +131,29 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_index = sub.add_parser("index", help="Build SQLite index from a data file.")
-    p_index.add_argument("file", help="Path to NDJSON source file (.db index written alongside it)")
+    p_index.add_argument(
+        "file",
+        help=(
+            "NDJSON source: a plain file, a .gz stream, or a zip member as"
+            " 'archive.zip::glob' (.db index written alongside it)"
+        ),
+    )
     p_index.set_defaults(func=cmd_index)
 
     p_query = sub.add_parser("query", help="Compute closure and write matching nodes to a file.")
-    p_query.add_argument("file", help="Path to NDJSON source file")
+    p_query.add_argument(
+        "file",
+        help="NDJSON source: plain file, .gz stream, or 'archive.zip::glob' zip member",
+    )
     p_query.add_argument("seed_type", help="Node type to seed the closure from")
     p_query.add_argument(
         "output",
         nargs="?",
         default=None,
-        help="Output path (default: <stem>_<seed_type>.json next to the input file)",
+        help=(
+            "Output path (default: <stem>_<seed_type>.json next to the input file)."
+            " A .gz or .zip extension writes compressed output."
+        ),
     )
     p_query.add_argument(
         "--where",

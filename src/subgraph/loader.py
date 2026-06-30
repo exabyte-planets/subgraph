@@ -10,6 +10,7 @@ import orjson
 from tqdm import tqdm
 
 from .graph import Graph, Node, guid_to_bytes
+from .sources import Source, SourceSpec, open_source
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +33,16 @@ def _parse_raw_line(raw_line: bytes) -> dict:
     return {"type": type_, **wrapper[type_]}
 
 
-def _iter_raw_with_offset(path: Path) -> Iterator[tuple[int, dict]]:
-    """Yield ``(byte_offset, record)`` for each data line of a JSON-array source file.
+def _iter_raw_with_offset(src: Source) -> Iterator[tuple[int, dict]]:
+    """Yield ``(byte_offset, record)`` for each data line of a JSON-array source.
 
     The source is a JSON array of ``{"typename": {fields}}`` objects, one per
     line, surrounded by ``[`` / ``]`` bracket lines.  Bracket lines and blank
     lines are skipped; ``byte_offset`` is the position of the line's first byte
-    from the start of the file.
+    from the start of the (decompressed) stream — the same address space every
+    later seek uses, so the offsets stay valid for compressed sources too.
     """
-    with open(path, "rb") as fh:
+    with open_source(src) as fh:
         offset = 0
         for raw_line in fh:
             stripped = raw_line.strip()
@@ -49,7 +51,7 @@ def _iter_raw_with_offset(path: Path) -> Iterator[tuple[int, dict]]:
             offset += len(raw_line)
 
 
-def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = False) -> None:
+def build_index(src_path: Source, db_path: str | Path, *, progress: bool = False) -> None:
     """Stream *src_path* and write a SQLite adjacency index to *db_path*.
 
     For each record we store ``uuid``, ``type``, and the line's byte ``offset``
@@ -57,7 +59,7 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
     into the index — they are recovered later by seeking to the stored offset.
     Calling this again on the same *db_path* rebuilds the index from scratch.
     """
-    src_path = Path(src_path)
+    spec = SourceSpec.parse(src_path)
     logger.info("building index from %s", src_path)
     db = sqlite3.connect(db_path)
     # journal/synchronous are disabled because the index is fully derived from
@@ -104,7 +106,7 @@ def build_index(src_path: str | Path, db_path: str | Path, *, progress: bool = F
         edge_buf.clear()
 
     with tqdm(desc="indexing", unit="rec", disable=not progress) as pbar:
-        for offset, rec in _iter_raw_with_offset(src_path):
+        for offset, rec in _iter_raw_with_offset(spec):
             try:
                 uuid, type_ = rec["Id"], rec["type"]
             except (KeyError, TypeError) as exc:
@@ -153,7 +155,7 @@ def _read_line_at(fh: BinaryIO, offset: int) -> bytes:
 
 
 def copy_records(
-    src_path: str | Path, graph: Graph, out_fh: BinaryIO, *, progress: bool = False
+    src_path: Source, graph: Graph, out_fh: BinaryIO, *, progress: bool = False
 ) -> int:
     """Copy the raw source bytes of every closure node to *out_fh* as a JSON array.
 
@@ -166,7 +168,7 @@ def copy_records(
     logger.info("copying %d records", total)
     written = 0
     out_fh.write(b"[\n")
-    with open(src_path, "rb") as fh:
+    with open_source(src_path) as fh:
         for offset in tqdm(
             graph.iter_closure_offsets(),
             total=total,
@@ -195,7 +197,7 @@ def _record_matches(rec: dict, where: list[tuple[str, str]]) -> bool:
 
 
 def iter_property_seed_uuids(
-    src_path: str | Path,
+    src_path: Source,
     graph: Graph,
     seed_type: str,
     where: list[tuple[str, str]],
@@ -211,7 +213,7 @@ def iter_property_seed_uuids(
     to be fed into :meth:`Graph.apply_seed_filter`.
     """
     logger.info("scanning %r nodes for property filter %s", seed_type, where)
-    with open(src_path, "rb") as fh:
+    with open_source(src_path) as fh:
         for uuid, offset in tqdm(
             graph.iter_type_offsets(seed_type),
             desc="filtering",
@@ -223,7 +225,7 @@ def iter_property_seed_uuids(
                 yield uuid
 
 
-def estimate_output_bytes(src_path: str | Path, graph: Graph, *, progress: bool = False) -> int:
+def estimate_output_bytes(src_path: Source, graph: Graph, *, progress: bool = False) -> int:
     """Return the exact number of bytes that :func:`copy_records` would write.
 
     Reads each closure record from *src_path* (same I/O as a real copy) but
@@ -235,7 +237,7 @@ def estimate_output_bytes(src_path: str | Path, graph: Graph, *, progress: bool 
         return 5  # "[\n" + "\n]\n"
 
     raw_total = 0
-    with open(src_path, "rb") as fh:
+    with open_source(src_path) as fh:
         for offset in tqdm(
             graph.iter_closure_offsets(),
             total=total,
@@ -250,7 +252,7 @@ def estimate_output_bytes(src_path: str | Path, graph: Graph, *, progress: bool 
     return raw_total + 2 * (total - 1) + 5
 
 
-def stream_nodes(src_path: str | Path, graph: Graph, *, progress: bool = False) -> Iterator[Node]:
+def stream_nodes(src_path: Source, graph: Graph, *, progress: bool = False) -> Iterator[Node]:
     """Yield :class:`Node` objects for every record in the stored closure.
 
     Drives off the closure's stored byte offsets, seeking directly to each
@@ -259,7 +261,7 @@ def stream_nodes(src_path: str | Path, graph: Graph, *, progress: bool = False) 
     """
     total = graph.closure_size()
     logger.info("streaming %d nodes from %s", total, src_path)
-    with open(src_path, "rb") as fh:
+    with open_source(src_path) as fh:
         for offset in tqdm(
             graph.iter_closure_offsets(),
             total=total,

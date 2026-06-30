@@ -67,6 +67,43 @@ required.  Records missing the property never match.  Only the **seeds** are
 filtered; nodes pulled in by following edges are kept regardless of their own
 property values.
 
+### Compressed sources
+
+The source may be a plain file, a gzip stream (`.gz`), or a JSON member inside a
+zip archive — handled transparently, without ever extracting the whole thing to
+disk (important when the decompressed JSON is larger than local storage):
+
+```bash
+# A gzip-compressed source
+uv run subgraph query data.json.gz person
+
+# A member inside a zip, named with a glob after '::'
+uv run subgraph query 'archive.zip::*.json' person
+```
+
+Quote the `archive.zip::glob` argument so the shell does not expand the glob
+itself. When the archive holds exactly one member, the `::glob` part may be
+omitted; otherwise the glob must match exactly one member (an error lists the
+available members so you can narrow it).
+
+The index (`.db`) is written next to the archive. Plain `data.json` and gzip
+`data.json.gz` both index to `data.db`; each zip member indexes separately to
+`archive.zip.<member>.db`.
+
+The output path may likewise be compressed — a `.gz` or `.zip` extension writes
+a compressed result:
+
+```bash
+uv run subgraph query data.json.gz person subset.json.gz
+```
+
+> Note: `--max-bytes` measures the **uncompressed** JSON payload, so it stays a
+> safe (conservative) bound when the output is compressed.
+
+> TODO: shell tab-completion of zip member names is not yet wired up, and a
+> compressed source is re-decompressed once per read pass (e.g. the `--max-bytes`
+> estimate pass and the copy pass are not yet fused).
+
 ### Closure statistics
 
 Every `query` run prints a stats line after the BFS completes:
@@ -151,6 +188,21 @@ with Graph("data.db") as g:
     g.transitive_closure("person")
     for node in stream_nodes("data.json", g):
         print(node.uuid, node.type, node.extra)
+```
+
+Every function that takes a source accepts the same forms the CLI does — a plain
+path, `"data.json.gz"`, or `"archive.zip::*.json"`. Use `db_path_for` to derive
+the matching index path, and `open_output` to write a compressed result:
+
+```python
+from subgraph import build_index, db_path_for, open_output, Graph, copy_records
+
+src = "archive.zip::data.json"
+build_index(src, db_path_for(src))
+with Graph(db_path_for(src)) as g:
+    g.transitive_closure("person")
+    with open_output("subset.json.gz") as fh:
+        copy_records(src, g, fh)
 ```
 
 ## Examples
